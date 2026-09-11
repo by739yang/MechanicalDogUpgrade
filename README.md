@@ -1,11 +1,12 @@
 # MechanicalDogUpgrade
 
-本仓库用于备份“面向救援的四足机器人”原始 MicroPython 程序，并持续整理 ESP-IDF C 版本升级资料。
+本仓库用于备份“基于灯哥开源的四足机器狗”原始 MicroPython 程序，并持续整理 ESP-IDF C 版本升级资料。
 
 ## 目录说明
 
 ```text
 .
+├── HANDOFF.md                  # 当前状态、决策和下一阶段交接说明
 ├── ESP-IDF_C迁移表.md          # MicroPython 到 ESP-IDF C 的迁移计划
 ├── micropython/                # 原始机器狗 MicroPython 运行代码
 │   ├── main.py
