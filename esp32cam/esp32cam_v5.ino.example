@@ -1,0 +1,448 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <WebSocketsServer.h>
+#include "UltrasonicSensor.h"
+// 传感器总开关：0=关闭，1=开启（在主文件中统一配置）
+#define ENABLE_DOG_SENSORS 0
+#include "dog_sensor_manager.h"
+
+#define CAMERA_MODEL_AI_THINKER // Has PSRAM
+#define DOG_SERIAL_RX 3
+#define DOG_SERIAL_TX 1
+#include "camera_pins.h"
+
+#define CAMERA_SENSOR_OV2640 2640
+#define CAMERA_SENSOR_OV5640 5640
+// 默认OV2640，可改为 CAMERA_SENSOR_OV5640
+#define CAMERA_SENSOR_TARGET CAMERA_SENSOR_OV5640
+// 串口与机器狗复用时，必须关闭调试文本，避免污染控制协议
+#define DOG_SERIAL_DEBUG 0
+
+// WebSocket服务器配置
+WebSocketsServer webSocket = WebSocketsServer(81);
+#define COMMAND_MAX_LENGTH 128
+
+enum class DogControlMode {
+  MANUAL,
+  OBSTACLE_AVOIDANCE
+};
+
+UltrasonicSensor g_ultrasonicSensor;
+DogControlMode g_dogControlMode = DogControlMode::MANUAL;
+unsigned long g_lastObstacleCommandAt = 0;
+const unsigned long OBSTACLE_COMMAND_INTERVAL_MS = 120;
+
+// ===========================
+// Enter your WiFi credentials
+// ===========================
+const char *ssid = "YOUR_WIFI_SSID";
+const char *password = "YOUR_WIFI_PASSWORD";
+
+void startCameraServer();
+void setupLedFlash(int pin);
+void sendIpResponse();
+void checkSerialConnection();
+boolean isIpAddressValid(IPAddress ip);
+String normalizeDogCommand(const String &rawCommand);
+bool applyModeCommand(const String &normalizedCommand);
+String translateAutoCommandToDogCommand(const String &autoCommand);
+
+// 连接状态变量（简化，仅用于基本功能）
+// 握手功能已关闭
+
+void setup() {
+  // 初始化引脚为高阻态
+  
+  Serial.begin(115200);
+  Serial.setDebugOutput(true);
+  Serial.println();
+  
+  initDogSensorManager();
+
+  // 初始化Serial2
+  Serial.println("初始化Serial2...");
+  Serial.print("DOG_SERIAL_RX引脚: ");
+  Serial.println(DOG_SERIAL_RX);
+  Serial.print("DOG_SERIAL_TX引脚: ");
+  Serial.println(DOG_SERIAL_TX);
+  
+  // 配置引脚模式
+  Serial.println("配置引脚模式...");
+  pinMode(DOG_SERIAL_TX, OUTPUT);
+  pinMode(DOG_SERIAL_RX, INPUT);
+  
+  // 初始化串口
+  Serial2.begin(115200, SERIAL_8N1, DOG_SERIAL_RX, DOG_SERIAL_TX);
+  // 设置接收缓冲区大小
+  Serial2.setRxBufferSize(2048);
+  delay(1000); // 增加延时，确保串口完全稳定
+  
+#if DOG_SERIAL_DEBUG
+  Serial2.println("Serial2初始化完成");
+#endif
+
+  g_ultrasonicSensor.begin();
+  g_ultrasonicSensor.setMode(UltrasonicMode::MANUAL_CONTROL);
+
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.frame_size = FRAMESIZE_QVGA;  // 调整为320x240分辨率，提高流畅度和稳定性
+  config.pixel_format = PIXFORMAT_JPEG;  // for streaming
+  //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.fb_location = CAMERA_FB_IN_DRAM;
+  config.jpeg_quality = 12;  // 调整为9，提供更好的画质和性能平衡
+  config.fb_count = 2;
+
+  // if PSRAM IC present, init with UXGA resolution and higher JPEG quality
+  //                      for larger pre-allocated frame buffer.
+  if (config.pixel_format == PIXFORMAT_JPEG) {
+    if (psramFound()) {
+      config.jpeg_quality = 10;
+      config.fb_count = 2;
+      config.grab_mode = CAMERA_GRAB_LATEST;
+    } else {
+      // Limit the frame size when PSRAM is not available
+      config.frame_size = FRAMESIZE_SVGA;
+      config.fb_location = CAMERA_FB_IN_DRAM;
+    }
+  } else {
+    // Best option for face detection/recognition
+    config.frame_size = FRAMESIZE_240X240;
+#if CONFIG_IDF_TARGET_ESP32S3
+    config.fb_count = 2;
+#endif
+  }
+
+#if defined(CAMERA_MODEL_ESP_EYE)
+  pinMode(13, INPUT_PULLUP);
+  pinMode(14, INPUT_PULLUP);
+#endif
+
+  // camera init
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    //Serial.printf("Camera init failed with error 0x%x", err);
+    return;
+  }
+
+  sensor_t *s = esp_camera_sensor_get();
+  if (CAMERA_SENSOR_TARGET == CAMERA_SENSOR_OV5640 && s->id.PID != OV5640_PID) {
+  #if DOG_SERIAL_DEBUG
+    Serial2.println("警告: 已选择OV5640宏，但当前摄像头不是OV5640");
+  #endif
+  }
+  if (CAMERA_SENSOR_TARGET == CAMERA_SENSOR_OV2640 && s->id.PID != OV2640_PID) {
+  #if DOG_SERIAL_DEBUG
+    Serial2.println("警告: 已选择OV2640宏，但当前摄像头不是OV2640");
+  #endif
+  }
+  // initial sensors are flipped vertically and colors are a bit saturated
+  // if (s->id.PID == OV3660_PID) {
+    s->set_vflip(s, 1);        // flip it back
+    s->set_brightness(s, 0);   // up the brightness just a bit
+    s->set_saturation(s, 0);  // lower the saturation
+    s->set_contrast(s, 0);     // 对比度（-2到2）
+    s->set_special_effect(s, 0); // 特殊效果（0-6，0是无效果）
+  //}
+  if (CAMERA_SENSOR_TARGET == CAMERA_SENSOR_OV5640 && s->id.PID == OV5640_PID) {
+    // OV5640层次优化：缓解高光过曝和暗部发黑
+    // OV5640在部分板卡上20MHz更容易出现固定竖条纹，降到10MHz提升稳定性
+    s->set_xclk(s, LEDC_TIMER_0, 10);
+    s->set_framesize(s, FRAMESIZE_CIF);
+    s->set_quality(s, 9);
+    s->set_brightness(s, 1);
+    s->set_contrast(s, -1);
+    s->set_saturation(s, 0);
+    s->set_sharpness(s, 0);
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_ae_level(s, 0);
+  }
+  if (CAMERA_SENSOR_TARGET == CAMERA_SENSOR_OV2640 && s->id.PID == OV2640_PID) {
+    // OV2640使用同一分辨率配置，保证通用代码行为一致。
+    s->set_framesize(s, FRAMESIZE_QVGA);
+    s->set_quality(s, 12);
+  }
+  // drop down frame size for higher initial frame rate
+  if (config.pixel_format == PIXFORMAT_JPEG) {
+    if (CAMERA_SENSOR_TARGET == CAMERA_SENSOR_OV5640 && s->id.PID == OV5640_PID) {
+      s->set_framesize(s, FRAMESIZE_CIF);
+    } else {
+      s->set_framesize(s, FRAMESIZE_QVGA);
+    }
+  }
+
+#if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
+  s->set_vflip(s, 1);
+  s->set_hmirror(s, 1);
+#endif
+
+#if defined(CAMERA_MODEL_ESP32S3_EYE)
+  s->set_vflip(s, 1);
+#endif
+
+// Setup LED FLash if LED pin is defined in camera_pins.h
+#if defined(LED_GPIO_NUM)
+  setupLedFlash(LED_GPIO_NUM);
+#endif
+
+  WiFi.begin(ssid, password);
+  WiFi.setSleep(false);
+
+  // 添加15秒超时
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 15000) {
+    delay(500);
+#if DOG_SERIAL_DEBUG
+    Serial2.print(".");
+#endif
+  }
+  
+  if(WiFi.status() != WL_CONNECTED){
+#if DOG_SERIAL_DEBUG
+    Serial2.println("Failed to connect WiFi!");
+#endif
+    ESP.restart();
+  }
+  
+  // 验证WiFi IP地址是否有效
+  IPAddress localIP = WiFi.localIP();
+  if (!isIpAddressValid(localIP)) {
+#if DOG_SERIAL_DEBUG
+    Serial2.println("警告: 未获取到有效IP地址!");
+#endif
+    // 可以选择在这里重新启动WiFi连接或设备
+  } else {
+    // 启动WebSocket服务器
+    webSocket.begin();
+    webSocket.onEvent(onWebSocketEvent);
+    
+    // 启动HTTP服务器
+    startCameraServer();
+
+    // 发送IP地址到ESP32端（机器狗）
+    sendIpResponse();
+  }
+  
+  // 添加提示信息，说明设备已准备好接收GET_IP命令
+#if DOG_SERIAL_DEBUG
+  Serial2.println("设备已准备好接收GET_IP命令");
+#endif
+}
+
+/**
+ * 检查IP地址是否有效（不是0.0.0.0）
+ */
+boolean isIpAddressValid(IPAddress ip) {
+  return !(ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0);
+}
+
+String normalizeDogCommand(const String &rawCommand) {
+  String cmd = rawCommand;
+  cmd.trim();
+  if (cmd.length() == 0) {
+    return "";
+  }
+
+  String lower = cmd;
+  lower.toLowerCase();
+
+  if (lower == "forward" || lower == "f" || cmd == "前进") return "Forward";
+  if (lower == "backward" || lower == "back" || lower == "b" || cmd == "后退") return "Backward";
+  if (lower == "left" || lower == "l" || cmd == "左转") return "Left";
+  if (lower == "right" || lower == "r" || cmd == "右转") return "Right";
+  if (lower == "stop" || lower == "s" || cmd == "停止") return "Stop";
+  if (lower == "cameraon" || lower == "camera_on") return "CameraOn";
+  if (lower == "cameraoff" || lower == "camera_off") return "CameraOff";
+  if (lower == "get_ip" || lower == "getip") return "GET_IP";
+
+  if (lower.startsWith("mode:") || lower.startsWith("mode=")) {
+    int idx = cmd.indexOf(':');
+    if (idx < 0) {
+      idx = cmd.indexOf('=');
+    }
+    if (idx >= 0 && idx < (cmd.length() - 1)) {
+      String modeValue = cmd.substring(idx + 1);
+      modeValue.trim();
+      if (modeValue.length() > 0) {
+        return "Mode:" + modeValue;
+      }
+    }
+  }
+
+  return cmd;
+}
+
+bool applyModeCommand(const String &normalizedCommand) {
+  if (!normalizedCommand.startsWith("Mode:")) {
+    return false;
+  }
+
+  String modeValue = normalizedCommand.substring(5);
+  modeValue.trim();
+  modeValue.toLowerCase();
+
+  if (modeValue == "obstacle" || modeValue == "avoid" || modeValue == "obstacle_avoidance" || modeValue == "避障") {
+    g_dogControlMode = DogControlMode::OBSTACLE_AVOIDANCE;
+    g_ultrasonicSensor.setMode(UltrasonicMode::OBSTACLE_AVOIDANCE);
+    Serial.println("控制模式切换: 避障模式");
+    return true;
+  }
+
+  if (modeValue == "manual" || modeValue == "off" || modeValue == "手动") {
+    g_dogControlMode = DogControlMode::MANUAL;
+    g_ultrasonicSensor.setMode(UltrasonicMode::MANUAL_CONTROL);
+    Serial2.print("Stop\n");
+    Serial.println("控制模式切换: 手动模式");
+    return true;
+  }
+
+  return false;
+}
+
+String translateAutoCommandToDogCommand(const String &autoCommand) {
+  String cmd = autoCommand;
+  cmd.trim();
+  cmd.toLowerCase();
+
+  if (cmd == "a" || cmd == "forward") return "Forward\n";
+  if (cmd == "b" || cmd == "backward") return "Backward\n";
+  if (cmd == "c" || cmd == "left") return "Left\n";
+  if (cmd == "d" || cmd == "right") return "Right\n";
+  if (cmd == "e" || cmd == "stop" || cmd == "st") return "Stop\n";
+  return "";
+}
+
+/**
+ * 发送IP地址响应给机器狗
+ */
+void sendIpResponse() {
+  IPAddress localIP = WiFi.localIP();
+  
+  // 检查IP地址是否有效
+  if (!isIpAddressValid(localIP)) {
+#if DOG_SERIAL_DEBUG
+    Serial2.println("错误: WiFi未连接或未获取到有效IP地址，无法发送IP响应");
+#endif
+    return;
+  }
+  
+  String ipAddress = localIP.toString();
+  String ipResponse = "IP_ADDRESS:" + ipAddress + "\n";
+  
+  // 尝试发送多次，确保机器狗能收到
+  for (int i = 0; i < 3; i++) {
+    Serial2.print(ipResponse);
+    
+    if (i < 2) { // 最后一次不需要延时
+      delay(100); // 每次发送间隔100ms
+    }
+  }
+  
+  // 同时也发送JSON格式的IP响应
+  String ipJson = "{\"esp32cam\":{\"ip\":\"" + ipAddress + "\"}}\n";
+  Serial2.print(ipJson);
+}
+
+// WebSocket事件处理函数
+void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length) {
+    switch (type) {
+        case WStype_DISCONNECTED: {
+            break;
+        }
+        case WStype_CONNECTED: {
+            // 发送连接成功消息
+            webSocket.sendTXT(num, "Connected to ESP32-CAM Dog Controller");
+            break;
+        }
+        case WStype_TEXT: {
+            // 处理接收到的文本命令
+            char command[COMMAND_MAX_LENGTH] = {0};
+            strncpy(command, (char *)payload, min(length, (size_t)(COMMAND_MAX_LENGTH - 1)));
+            
+            // 将命令转发给机器狗
+        String commandStr = normalizeDogCommand(String(command));
+        if (applyModeCommand(commandStr)) {
+          webSocket.sendTXT(num, "OK");
+          break;
+        }
+        if (!commandStr.endsWith("\n")) {
+            commandStr += "\n";
+        }
+        // 只发送文本命令，确保不会发送二进制图像数据
+        bool isText = true;
+        for (int i = 0; i < commandStr.length(); i++) {
+          char c = commandStr.charAt(i);
+          if (c < 32 && c != '\n' && c != '\r' && c != '\t') {
+            isText = false;
+            break;
+          }
+        }
+        if (commandStr.length() > 0 && isText) {
+          Serial2.print(commandStr);
+        }
+        webSocket.sendTXT(num, "OK");
+        break;
+        }
+        default:
+            break;
+    }
+}
+
+void loop() {
+  // 处理WebSocket连接
+  webSocket.loop();
+  
+  // 处理从机器狗接收的传感器数据
+  processDogSensorDataFromSerial(Serial2, normalizeDogCommand, sendIpResponse);
+
+  if (g_dogControlMode == DogControlMode::OBSTACLE_AVOIDANCE) {
+    g_ultrasonicSensor.processEvents();
+    unsigned long now = millis();
+    if (now - g_lastObstacleCommandAt >= OBSTACLE_COMMAND_INTERVAL_MS) {
+      String autoCommand = g_ultrasonicSensor.generateControlCommand();
+      String dogCommand = translateAutoCommandToDogCommand(autoCommand);
+      if (dogCommand.length() > 0) {
+        Serial2.print(dogCommand);
+      }
+      g_lastObstacleCommandAt = now;
+    }
+  }
+  
+  delay(10);
+}
+
+/**
+ * 检查并维护与机器狗的串口连接
+ */
+void checkSerialConnection() {
+  // 握手功能已关闭，此函数保留但不执行任何操作
+}
+
+/**
+ * 尝试与机器狗进行握手
+ */
+void attemptHandshake() {
+  // 握手功能已关闭，此函数保留但不执行任何操作
+}

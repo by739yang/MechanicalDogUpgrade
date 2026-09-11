@@ -1,0 +1,10 @@
+{
+  "com_port": "",
+  "chip": "esp32",
+  "flash_offset": "0x1000",
+  "esptool_baud": "460800",
+  "post_flash_wait_sec": 8,
+  "mpremote_retries": 5,
+  "mpremote_retry_delay_sec": 2.0,
+  "mpremote_first_delay_sec": 1.0
+}

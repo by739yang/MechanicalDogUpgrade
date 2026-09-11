@@ -1,0 +1,24 @@
+# Local secrets
+config.py
+config.local.py
+secrets.h
+wifi_config.h
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Build and IDE output
+.pio/
+.vscode/.browse
+build/
+*.bin
+*.elf
+*.map
+
+# Local backups and test artifacts
+_board_backup_*/
+_local_backup_*/
+test/
+*.log

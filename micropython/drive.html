@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>机器狗遥控</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:"Segoe UI",system-ui,sans-serif;margin:0;padding:10px;background:#0f1419;color:#e8eaed}
+h1{font-size:1.15em;text-align:center;margin:6px 0 14px;color:#7dd3fc;font-weight:600}
+h2{font-size:.95em;margin:0 0 8px;color:#94a3b8;font-weight:500}
+.sec{margin:10px auto;max-width:620px;padding:14px;background:#1e293b;border-radius:12px;border:1px solid #334155}
+.row{display:flex;flex-wrap:wrap;justify-content:center;gap:20px;align-items:flex-start}
+.col{text-align:center;flex:1;min-width:200px;max-width:300px}
+.joy-box{width:min(78vw,260px);height:min(78vw,260px);margin:auto;touch-action:none}
+.lbl{font-size:12px;color:#94a3b8;margin-top:6px}
+.val{width:36px;background:#0f172a;border:1px solid #475569;color:#f1f5f9;text-align:center;border-radius:4px}
+.btn{margin:5px 3px;padding:10px 14px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;color:#0f172a}
+.btn-wide{min-width:46%;margin:6px 2%}
+.btn-dog{background:#fb923c;color:#1c1917}
+.btn-dog2{background:#fbbf24;color:#1c1917}
+.btn-act{background:#4ade80;color:#14532d}
+.btn-act2{background:#38bdf8;color:#0c4a6e}
+.btn-act3{background:#c084fc;color:#3b0764}
+.btn-warn{background:#f87171;color:#450a0a}
+.btn-arm{background:#2dd4bf;color:#134e4a}
+.btn-grip{background:#818cf8;color:#1e1b4b}
+.btn-toggle-off{background:#475569;color:#e2e8f0}
+.btn-toggle-on{background:#22d3ee;color:#083344}
+.grip-row{display:flex;align-items:center;gap:10px;margin-top:12px;padding:0 8px}
+.grip-row input[type=range]{flex:1;accent-color:#818cf8;height:28px}
+.foot{text-align:center;font-size:11px;color:#64748b;margin-top:12px}
+</style>
+<script>
+var JoyStick=function(c,p){p=p||{};var t=p.title||c,w=p.width||0,h=p.height||0,
+ifc=p.internalFillColor||"#22d3ee",isc=p.internalStrokeColor||"#0891b2",
+elw=p.externalLineWidth||2,esc=p.externalStrokeColor||"#64748b",arc=p.autoReturnToCenter!==false,
+onCh=p.onChange||null;
+var o=document.getElementById(c),cv=document.createElement("canvas");cv.id=t;
+if(!w)w=o.clientWidth||260;if(!h)h=o.clientHeight||260;cv.width=w;cv.height=h;o.appendChild(cv);
+var x=cv.getContext("2d"),pr=0,pi=2*Math.PI,pad=Math.max(8,Math.round(w*0.04)),
+ir=(cv.width-(cv.width/2+pad))/2,mx=ir+8,er=ir+Math.round(w*0.14),
+cx=cv.width/2,cy=cv.height/2,mx0=cx,my0=cy;
+function chg(){if(onCh)try{onCh()}catch(e){}}
+function ex(){x.beginPath();x.arc(cx,cy,er,0,pi);x.lineWidth=elw;x.strokeStyle=esc;x.stroke()}
+function inn(){x.beginPath();if(mx0<ir)mx0=mx;if(mx0+ir>cv.width)mx0=cv.width-mx;if(my0<ir)my0=mx;if(my0+ir>cv.height)my0=cv.height-mx;
+x.arc(mx0,my0,ir,0,pi);var g=x.createRadialGradient(cx,cy,5,cx,cy,180);g.addColorStop(0,ifc);g.addColorStop(1,isc);
+x.fillStyle=g;x.fill();x.lineWidth=2;x.strokeStyle=isc;x.stroke();chg()}
+function om(e){pr=1}function mm(e){if(!pr)return;mx0=e.pageX;my0=e.pageY;
+var op=cv.offsetParent;if(!op||op.tagName.toUpperCase()==="BODY"){mx0-=cv.offsetLeft;my0-=cv.offsetTop}else{mx0-=op.offsetLeft;my0-=op.offsetTop}
+x.clearRect(0,0,cv.width,cv.height);ex();inn()}
+function ou(){pr=0;if(arc){mx0=cx;my0=cy}x.clearRect(0,0,cv.width,cv.height);ex();inn()}
+if("ontouchstart" in document.documentElement){cv.addEventListener("touchstart",function(e){pr=1;e.preventDefault()},false);
+cv.addEventListener("touchmove",function(e){e.preventDefault();if(pr&&e.targetTouches[0].target===cv){mx0=e.targetTouches[0].pageX;my0=e.targetTouches[0].pageY;
+var op=cv.offsetParent;if(!op||op.tagName.toUpperCase()==="BODY"){mx0-=cv.offsetLeft;my0-=cv.offsetTop}else{mx0-=op.offsetLeft;my0-=op.offsetTop}
+x.clearRect(0,0,cv.width,cv.height);ex();inn()}},false);
+cv.addEventListener("touchend",ou,false)}else{cv.addEventListener("mousedown",om);cv.addEventListener("mousemove",mm);cv.addEventListener("mouseup",ou)}
+ex();inn();
+this.GetX=function(){return(100*((mx0-cx)/mx)).toFixed()};
+this.GetY=function(){return((100*((my0-cy)/mx))*-1).toFixed()};
+this.ResetCenter=function(){mx0=cx;my0=cy;x.clearRect(0,0,cv.width,cv.height);ex();inn()}};
+function cmd(k){var r=new XMLHttpRequest();r.open("GET","key="+k,true);r.send()}
+function toggleGait(){var b=document.getElementById("gaitBtn");
+if(b.dataset.m==="0"){b.dataset.m="1";b.textContent="步态 · WALK（慢步）";b.className="btn btn-wide btn-toggle-on";cmd("g1")}
+else{b.dataset.m="0";b.textContent="步态 · TROT（推荐）";b.className="btn btn-wide btn-toggle-off";cmd("g0")}}
+var ARM_UC=145,ARM_FC=125,ARM_U_LO=0,ARM_U_HI=180,ARM_F_LO=30,ARM_F_HI=140;
+function armHomeUi(){
+if(JoyArm&&JoyArm.ResetCenter)JoyArm.ResetCenter();
+document.getElementById("armY").value=ARM_UC;
+document.getElementById("armX").value=ARM_FC}
+function toggleArm(){var b=document.getElementById("armBtn");
+if(b.dataset.m==="0"){b.dataset.m="1";b.textContent="机械臂 · 已启用";b.className="btn btn-wide btn-toggle-on";armHomeUi();cmd("am1")}
+else{b.dataset.m="0";b.textContent="机械臂 · 关闭";b.className="btn btn-wide btn-toggle-off";armHomeUi();cmd("am0")}}
+function gripOpen(){document.getElementById("gripSl").value=0;sendGrip();cmd("btn_grip_open")}
+function gripClose(){document.getElementById("gripSl").value=100;sendGrip();cmd("btn_grip_close")}
+var gripReq=null;
+function sendGrip(){var v=document.getElementById("gripSl").value;
+document.getElementById("gripVal").textContent=v;
+if(gripReq&&gripReq.readyState!==0&&gripReq.readyState!==4)return;
+gripReq=new XMLHttpRequest();gripReq.open("GET","grip="+v,true);gripReq.send()}
+var JoyDog,JoyArm,dogReq=null,armReq=null;
+var dogPollMs=80,armPollMs=35,retryMs=300;
+function stickToArm(stick,center,vmin,vmax){
+var s=parseFloat(stick),c=parseFloat(center),lo=parseFloat(vmin),hi=parseFloat(vmax);
+var up=hi-c,dn=c-lo,a;
+if(s>=0)a=c+s*up/100;else a=c+s*dn/100;
+if(a<lo)a=lo;if(a>hi)a=hi;return Math.round(a)}
+function showArmDeg(ay,ax){
+document.getElementById("armY").value=stickToArm(ay,ARM_UC,ARM_U_LO,ARM_U_HI);
+document.getElementById("armX").value=stickToArm(ax,ARM_FC,ARM_F_LO,ARM_F_HI)}
+function sendArm(){
+if(document.hidden||!JoyArm)return;
+var btn=document.getElementById("armBtn");
+if(!btn||btn.dataset.m!=="1")return;
+var ay=JoyArm.GetY(),ax=JoyArm.GetX();
+showArmDeg(ay,ax);
+if(armReq&&armReq.readyState!==0&&armReq.readyState!==4)return;
+armReq=new XMLHttpRequest();armReq.timeout=5000;
+armReq.onerror=armReq.ontimeout=function(){setTimeout(sendArm,retryMs)};
+armReq.open("GET","jy="+ay+"jx="+ax,true);armReq.send()}
+function pollDog(){
+if(document.hidden||!JoyDog)return;
+var dy=JoyDog.GetY(),dx=JoyDog.GetX();
+document.getElementById("dogY").value=dy;document.getElementById("dogX").value=dx;
+if(dogReq&&dogReq.readyState!==0&&dogReq.readyState!==4)return;
+dogReq=new XMLHttpRequest();dogReq.timeout=8000;
+dogReq.onerror=dogReq.ontimeout=function(){setTimeout(pollDog,retryMs)};
+dogReq.open("GET","f="+dy+"t="+dx,true);dogReq.send()}
+window.onload=function(){
+JoyDog=new JoyStick("joyDog",{internalFillColor:"#fb923c",internalStrokeColor:"#c2410c",externalStrokeColor:"#78716c"});
+JoyArm=new JoyStick("joyArm",{internalFillColor:"#2dd4bf",internalStrokeColor:"#0f766e",externalStrokeColor:"#64748b",autoReturnToCenter:false,onChange:sendArm});
+setInterval(pollDog,dogPollMs);setInterval(sendArm,armPollMs)}
+</script>
+</head>
+<body>
+<h1>机器狗 · 遥控台</h1>
+
+<div class="sec">
+<h2>四足移动</h2>
+<div class="row">
+<div class="col">
+<div id="joyDog" class="joy-box"></div>
+<p class="lbl">前后 <input id="dogY" class="val" readonly/> · 转向 <input id="dogX" class="val" readonly/></p>
+</div>
+</div>
+</div>
+
+<div class="sec">
+<h2>机械臂 · 大臂 / 小臂</h2>
+<div class="row">
+<div class="col">
+<div id="joyArm" class="joy-box"></div>
+<p class="lbl">大臂 <input id="armY" class="val" readonly/>° · 小臂 <input id="armX" class="val" readonly/>°</p>
+<p class="lbl" style="font-size:11px">初始145°/125° · 行走/开关回初始 · 松手不回中</p>
+</div>
+</div>
+<div class="grip-row">
+<span class="lbl">夹爪</span>
+<span class="lbl">张</span>
+<input type="range" id="gripSl" min="0" max="100" value="0" oninput="sendGrip()"/>
+<span class="lbl">合</span>
+<span id="gripVal" class="lbl">0</span>
+</div>
+<div style="text-align:center;margin-top:8px">
+<button class="btn btn-grip" onclick="gripOpen()">夹爪张开</button>
+<button class="btn btn-grip" onclick="gripClose()">夹爪夹住</button>
+</div>
+</div>
+
+<div class="sec" style="text-align:center">
+<button class="btn btn-wide btn-toggle-off" id="gaitBtn" data-m="0" onclick="toggleGait()">步态 · TROT（推荐）</button>
+<button class="btn btn-wide btn-toggle-off" id="armBtn" data-m="0" onclick="toggleArm()">机械臂 · 关闭</button>
+<br/>
+<button class="btn btn-act" onclick="cmd('btn_stand')">站立</button>
+<button class="btn btn-act2" onclick="cmd('btn_sit')">坐下</button>
+<button class="btn btn-dog2" onclick="cmd('btn_wave')">挥手</button>
+<button class="btn btn-act3" onclick="cmd('btn_crawl')">爬行</button>
+</div>
+
+<p class="foot">标定与参数修改：main.py 设 web_ui_mode=1</p>
+</body>
+</html>
