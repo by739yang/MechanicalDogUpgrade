@@ -7,12 +7,63 @@
 
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "bsp_i2c";
 
 static bool s_installed = false;
+
+/**
+ * @brief 总线恢复：从设备若把 SDA 拉低不放，用 9 个 SCL 脉冲把它顶出去。
+ *
+ * 必须在 I2C 驱动安装之前调用（要直接控制 GPIO）。
+ */
+esp_err_t bsp_i2c_bus_recover(void)
+{
+    if (s_installed) {
+        ESP_LOGW(TAG, "总线恢复需在 I2C 安装前调用，已跳过");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* 开漏 + 上拉：既能读又能拉低 */
+    gpio_set_direction(BSP_I2C_SCL_GPIO, GPIO_MODE_INPUT_OUTPUT_OD);
+    gpio_set_direction(BSP_I2C_SDA_GPIO, GPIO_MODE_INPUT_OUTPUT_OD);
+    gpio_set_pull_mode(BSP_I2C_SCL_GPIO, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(BSP_I2C_SDA_GPIO, GPIO_PULLUP_ONLY);
+
+    /* 先确保两根线都释放（高） */
+    gpio_set_level(BSP_I2C_SCL_GPIO, 1);
+    gpio_set_level(BSP_I2C_SDA_GPIO, 1);
+    esp_rom_delay_us(10);
+
+    const int sda_before = gpio_get_level(BSP_I2C_SDA_GPIO);
+
+    for (int i = 0; i < 9; ++i) {
+        gpio_set_level(BSP_I2C_SCL_GPIO, 0);
+        esp_rom_delay_us(5);
+        gpio_set_level(BSP_I2C_SCL_GPIO, 1);
+        esp_rom_delay_us(5);
+    }
+
+    /* 补一个 STOP：SCL 高时 SDA 由低变高 */
+    gpio_set_level(BSP_I2C_SDA_GPIO, 0);
+    esp_rom_delay_us(5);
+    gpio_set_level(BSP_I2C_SCL_GPIO, 1);
+    esp_rom_delay_us(5);
+    gpio_set_level(BSP_I2C_SDA_GPIO, 1);
+    esp_rom_delay_us(10);
+
+    const int sda_after = gpio_get_level(BSP_I2C_SDA_GPIO);
+
+    ESP_LOGI(TAG, "总线恢复: 9 个 SCL 脉冲已发出; SDA 恢复前=%d 恢复后=%d %s",
+             sda_before, sda_after, (sda_after == 1) ? "(总线已释放 ✔)" : "(SDA 仍为低 ✘)");
+    return ESP_OK;
+}
 
 esp_err_t bsp_i2c_init(void)
 {
@@ -99,20 +150,29 @@ esp_err_t bsp_i2c_read_reg(uint8_t dev, uint8_t reg, uint8_t *data, size_t len)
                                         pdMS_TO_TICKS(BSP_I2C_TIMEOUT_MS));
 }
 
-esp_err_t bsp_i2c_probe(uint8_t dev)
+esp_err_t bsp_i2c_probe_timed(uint8_t dev, int64_t *elapsed_us)
 {
     if (!s_installed) {
         return ESP_ERR_INVALID_STATE;
     }
 
     uint8_t dummy = 0;
+    const int64_t t0 = esp_timer_get_time();
     /* 只要能读到 1 个字节，就说明地址被 ACK 了 */
     esp_err_t err = i2c_master_read_from_device(BSP_I2C_PORT, dev, &dummy, 1,
                                                 pdMS_TO_TICKS(BSP_I2C_SCAN_TIMEOUT_MS));
+    if (elapsed_us != NULL) {
+        *elapsed_us = esp_timer_get_time() - t0;
+    }
     if (err != ESP_OK) {
         return ESP_ERR_NOT_FOUND;
     }
     return ESP_OK;
+}
+
+esp_err_t bsp_i2c_probe(uint8_t dev)
+{
+    return bsp_i2c_probe_timed(dev, NULL);
 }
 
 size_t bsp_i2c_scan(uint8_t *found, size_t max_found)
@@ -125,8 +185,19 @@ size_t bsp_i2c_scan(uint8_t *found, size_t max_found)
         return 0;
     }
 
+    const int64_t t_start = esp_timer_get_time();
     size_t count = 0;
+    size_t probed = 0;
+
     for (uint16_t addr = BSP_I2C_ADDR_MIN; addr <= BSP_I2C_ADDR_MAX; ++addr) {
+        /* 每 16 个地址打一次进度：万一某次探测异常慢，日志能指出卡在哪一段 */
+        if ((probed % 16) == 0) {
+            ESP_LOGI(TAG, "  扫描进度 0x%02X.. (已探测 %u 个, 命中 %u, 已用 %lld ms)",
+                     addr, (unsigned)probed, (unsigned)count,
+                     (long long)((esp_timer_get_time() - t_start) / 1000));
+        }
+        ++probed;
+
         if (bsp_i2c_probe((uint8_t)addr) == ESP_OK) {
             if (count < max_found) {
                 found[count] = (uint8_t)addr;
@@ -134,5 +205,9 @@ size_t bsp_i2c_scan(uint8_t *found, size_t max_found)
             ++count;
         }
     }
+
+    ESP_LOGI(TAG, "  扫描完成: 探测 %u 个地址, 命中 %u 个, 总耗时 %lld ms",
+             (unsigned)probed, (unsigned)count,
+             (long long)((esp_timer_get_time() - t_start) / 1000));
     return count;
 }

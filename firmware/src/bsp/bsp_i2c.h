@@ -32,8 +32,8 @@ extern "C" {
 #define BSP_I2C_CLK_HZ          100000
 /** 普通读写超时（毫秒） */
 #define BSP_I2C_TIMEOUT_MS      100
-/** 扫描时单个地址的超时（毫秒），短一些以免无器件时扫得太慢 */
-#define BSP_I2C_SCAN_TIMEOUT_MS 20
+/** 扫描时单个地址的超时（毫秒）。实测发现设太大时若总线异常会拖很久，故调小 */
+#define BSP_I2C_SCAN_TIMEOUT_MS 10
 
 /** I2C 扫描地址范围（7 位地址） */
 #define BSP_I2C_ADDR_MIN        0x08
@@ -69,6 +69,24 @@ esp_err_t bsp_i2c_read_reg(uint8_t dev, uint8_t reg, uint8_t *data, size_t len);
  * @return ESP_OK 有应答；ESP_ERR_NOT_FOUND 无应答；其它为总线错误。
  */
 esp_err_t bsp_i2c_probe(uint8_t dev);
+
+/**
+ * @brief 与 bsp_i2c_probe() 相同，但额外返回本次探测耗时（微秒）。
+ *
+ * 用途：排查"扫描很慢/像卡死"的问题。若单个探测耗时达到数百毫秒，
+ *       说明总线被拉低或从设备在拉伸时钟，而不是代码死循环。
+ */
+esp_err_t bsp_i2c_probe_timed(uint8_t dev, int64_t *elapsed_us);
+
+/**
+ * @brief I2C 总线恢复：把从设备卡住的 SDA 用 9 个 SCL 脉冲释放，并补一个 STOP。
+ *
+ * 场景：从设备在上电过程中被复位、或在传输中途断电，会把 SDA 拉低不放，
+ *       导致主机永远等不到总线空闲。标准做法是手动发 9 个时钟。
+ *
+ * @note 只能在 bsp_i2c_init() 之前或 deinit 之后调用（需要独占 GPIO）。
+ */
+esp_err_t bsp_i2c_bus_recover(void);
 
 /**
  * @brief 扫描整条总线。

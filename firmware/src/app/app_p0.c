@@ -130,25 +130,67 @@ static void report_board_state(uint8_t addr)
     }
 }
 
+/**
+ * @brief 探测单个地址并打印结论与耗时。
+ *
+ * 打印耗时很关键：若"不存在"的地址探测耗时达到几百毫秒，
+ * 说明是总线被拉低 / 从设备在拉伸时钟，而不是代码死循环。
+ */
+static bool probe_verbose(uint8_t addr, const char *what)
+{
+    int64_t us = 0;
+    const esp_err_t err = bsp_i2c_probe_timed(addr, &us);
+    const bool ok = (err == ESP_OK);
+    if (ok) {
+        ESP_LOGI(TAG, "  0x%02X  %-26s -> 应答 ✔   (%lld us)",
+                 addr, what, (long long)us);
+    } else {
+        ESP_LOGW(TAG, "  0x%02X  %-26s -> 无应答  (%lld us)",
+                 addr, what, (long long)us);
+    }
+    return ok;
+}
+
 static void selftest(void)
 {
     log_separator();
-    ESP_LOGI(TAG, "步骤 1/4：初始化 I2C 总线");
+    ESP_LOGI(TAG, "步骤 1/5：I2C 总线恢复（9 个 SCL 脉冲，防止从设备卡住 SDA）");
+    bsp_i2c_bus_recover();
+
+    log_separator();
+    ESP_LOGI(TAG, "步骤 2/5：初始化 I2C 总线");
     if (bsp_i2c_init() != ESP_OK) {
         ESP_LOGE(TAG, "I2C 初始化失败，P0 自检中止");
         return;
     }
 
+    /* 先做定向探测：只碰 5 个关键地址，几毫秒就能出结论。
+       即使后面的全总线扫描异常，这里的结果也已经打进日志了。 */
     log_separator();
-    ESP_LOGI(TAG, "步骤 2/4：扫描总线");
-    do_scan(true);
-    if (!verify_expected_devices()) {
-        ESP_LOGE(TAG, "期望的 PCA9685 未全部出现，请检查供电/接线/共地，自检中止");
+    ESP_LOGI(TAG, "步骤 3/5：关键地址定向探测（只需 5 次，先拿到关键结论）");
+    const bool ok40 = probe_verbose(DRV_PCA9685_ADDR_LEFT, "PCA9685 左半身");
+    const bool ok41 = probe_verbose(DRV_PCA9685_ADDR_RIGHT, "PCA9685 右半身");
+    probe_verbose(DRV_PCA9685_ADDR_ALLCALL, "PCA9685 all-call 广播");
+    probe_verbose(0x68, "IMU (MPU6050 AD0=低)");
+    probe_verbose(0x69, "IMU (MPU6050 AD0=高)");
+
+    if (!ok40 || !ok41) {
+        ESP_LOGE(TAG, "期望的 PCA9685 未全部应答 —— 常见原因：");
+        ESP_LOGE(TAG, "  1) PCA9685 逻辑电源未供电。本机疑为取自电池那路 5V，");
+        ESP_LOGE(TAG, "     只插 Type-C 而不开电池时，PCA9685 可能没电。");
+        ESP_LOGE(TAG, "  2) SDA/SCL 接线错误，或未共地。");
+        ESP_LOGE(TAG, "自检在此中止，跳过全总线扫描与 PCA9685 初始化。");
+        ESP_LOGE(TAG, "控制台仍会启动，可敲 scan 重试。");
         return;
     }
+    ESP_LOGI(TAG, "两片 PCA9685 都在线 ✔");
 
     log_separator();
-    ESP_LOGI(TAG, "步骤 3/4：初始化两片 PCA9685 并置为安全态（所有通道无脉冲）");
+    ESP_LOGI(TAG, "步骤 4/5：全总线扫描（0x08..0x77，带进度与耗时）");
+    do_scan(true);
+
+    log_separator();
+    ESP_LOGI(TAG, "步骤 5/5：初始化两片 PCA9685（置安全态）+ 回读校验");
     for (size_t i = 0; i < P0_BOARD_COUNT; ++i) {
         esp_err_t err = drv_pca9685_init(s_boards[i], DRV_PCA9685_DEFAULT_HZ);
         if (err != ESP_OK) {
@@ -156,9 +198,6 @@ static void selftest(void)
             return;
         }
     }
-
-    log_separator();
-    ESP_LOGI(TAG, "步骤 4/4：回读校验");
     for (size_t i = 0; i < P0_BOARD_COUNT; ++i) {
         report_board_state(s_boards[i]);
     }
