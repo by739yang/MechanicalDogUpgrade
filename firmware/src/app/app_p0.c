@@ -56,51 +56,71 @@ static void log_separator(void)
  * I2C 扫描
  * ========================================================================== */
 
-static size_t do_scan(bool verbose)
+/**
+ * @brief 全总线扫描（位操作实现，绕开驱动的 1000 ms/失败地址 限制）。
+ *
+ * 位操作需要独占 GPIO，所以先卸载 I2C 驱动，扫完立刻装回来。
+ * 这个装卸**不影响 PCA9685**：它是自主输出 PWM 的从设备，寄存器状态不变，
+ * 舵机脉冲不会中断。
+ *
+ * @return 命中个数
+ */
+static size_t do_scan(void)
 {
     uint8_t found[32] = {0};
-    const size_t n = bsp_i2c_scan(found, sizeof(found));
+    size_t n = 0;
+
+    bsp_i2c_deinit();                       /* 让出 GPIO */
+
+    if (bsp_i2c_bitbang_begin() == ESP_OK) {
+        n = bsp_i2c_scan_bitbang(found, sizeof(found));
+    } else {
+        ESP_LOGE(TAG, "位操作初始化失败");
+    }
+
+    if (bsp_i2c_init() != ESP_OK) {         /* 装回来，后续指令要用 */
+        ESP_LOGE(TAG, "重新安装 I2C 驱动失败");
+        return 0;
+    }
 
     if (n == 0) {
         ESP_LOGW(TAG, "扫描结果：总线上没有任何器件");
         return 0;
     }
 
-    if (verbose) {
-        char line[160] = {0};
-        size_t used = 0;
-        for (size_t i = 0; i < n && i < sizeof(found); ++i) {
-            int wrote = snprintf(&line[used], sizeof(line) - used,
-                                 "%s0x%02X", (used == 0) ? "" : ", ", found[i]);
-            if (wrote <= 0 || (size_t)wrote >= sizeof(line) - used) {
-                break;
-            }
-            used += (size_t)wrote;
+    char line[160] = {0};
+    size_t used = 0;
+    for (size_t i = 0; i < n && i < sizeof(found); ++i) {
+        int wrote = snprintf(&line[used], sizeof(line) - used,
+                             "%s0x%02X", (used == 0) ? "" : ", ", found[i]);
+        if (wrote <= 0 || (size_t)wrote >= sizeof(line) - used) {
+            break;
         }
-        ESP_LOGI(TAG, "扫描结果（%u 个）：%s", (unsigned)n, line);
+        used += (size_t)wrote;
     }
+    ESP_LOGI(TAG, "扫描结果（%u 个）：%s", (unsigned)n, line);
     return n;
 }
 
 /**
  * @brief 按迁移表的标准核对：0x40 与 0x41 必须出现。
+ *
+ * 这里用**驱动路径**再确认一次（而不是只信位操作扫描）——意义不同：
+ * 位操作证明"器件在总线上"，驱动读通才证明"后续读写能正常工作"。
+ *
+ * @note 故意**不**在这里探测 0x68/0x69：器件不存在时每次要 1000 ms，
+ *       而"有没有 IMU"已经由位操作全扫描回答了。
  */
 static bool verify_expected_devices(void)
 {
-    bool ok40 = (bsp_i2c_probe(DRV_PCA9685_ADDR_LEFT) == ESP_OK);
-    bool ok41 = (bsp_i2c_probe(DRV_PCA9685_ADDR_RIGHT) == ESP_OK);
+    const bool ok40 = (bsp_i2c_probe(DRV_PCA9685_ADDR_LEFT) == ESP_OK);
+    const bool ok41 = (bsp_i2c_probe(DRV_PCA9685_ADDR_RIGHT) == ESP_OK);
 
     ESP_LOGI(TAG, "核对 0x40 (左半身) : %s", ok40 ? "存在 ✔" : "缺失 ✘");
     ESP_LOGI(TAG, "核对 0x41 (右半身) : %s", ok41 ? "存在 ✔" : "缺失 ✘");
 
     if (bsp_i2c_probe(DRV_PCA9685_ADDR_ALLCALL) == ESP_OK) {
         ESP_LOGI(TAG, "0x70 也在线 —— 这是 PCA9685 的 all-call 广播地址，不是 IMU");
-    }
-    /* 板上无 IMU（2026-09-14 全引脚扫描确认）。这里顺带再看一眼，便于记录。 */
-    if (bsp_i2c_probe(0x68) == ESP_OK || bsp_i2c_probe(0x69) == ESP_OK) {
-        ESP_LOGW(TAG, "意外发现 0x68/0x69 —— 说明新增了 IMU，需更新迁移计划");
-    } else {
-        ESP_LOGI(TAG, "0x68/0x69 无应答：与实测一致（本机没有 IMU）");
     }
 
     return ok40 && ok41;
@@ -154,44 +174,44 @@ static bool probe_verbose(uint8_t addr, const char *what)
 static void selftest(void)
 {
     log_separator();
-    ESP_LOGI(TAG, "步骤 1/4：I2C 总线恢复（9 个 SCL 脉冲，防止从设备卡住 SDA）");
+    ESP_LOGI(TAG, "步骤 1/5：I2C 总线恢复（9 个 SCL 脉冲，防止从设备卡住 SDA）");
     bsp_i2c_bus_recover();
 
+    /* 全总线扫描放在驱动安装之前，用位操作做。
+       原因：IDF 5.1.2 的 legacy 驱动把事件等待下限硬编码成 1000 ms，
+       探测不存在的地址每次要 1 秒（112 个地址 = 112 秒）。位操作只要 ~20 ms。
+       这一步同时给出"总线上到底有什么"的完整清单 —— 包括有没有 IMU。 */
     log_separator();
-    ESP_LOGI(TAG, "步骤 2/4：初始化 I2C 总线");
+    ESP_LOGI(TAG, "步骤 2/5：位操作全总线扫描（不依赖驱动，约 20 ms）");
+    const size_t n_found = do_scan();
+
+    log_separator();
+    ESP_LOGI(TAG, "步骤 3/5：初始化 I2C 驱动");
     if (bsp_i2c_init() != ESP_OK) {
         ESP_LOGE(TAG, "I2C 初始化失败，P0 自检中止");
         return;
     }
 
-    /* 先做定向探测：只碰 5 个关键地址，几毫秒就能出结论。
-       即使后面的全总线扫描异常，这里的结果也已经打进日志了。 */
+    /* 用驱动路径再确认三个关键地址：证明后续读写能正常工作。
+       只探这 3 个（都存在），所以这一步是"零成本"的。 */
     log_separator();
-    ESP_LOGI(TAG, "步骤 3/4：关键地址定向探测（只需 5 次，先拿到关键结论）");
+    ESP_LOGI(TAG, "步骤 4/5：驱动路径定向探测（只探存在的 3 个地址，零等待）");
     const bool ok40 = probe_verbose(DRV_PCA9685_ADDR_LEFT, "PCA9685 左半身");
     const bool ok41 = probe_verbose(DRV_PCA9685_ADDR_RIGHT, "PCA9685 右半身");
     probe_verbose(DRV_PCA9685_ADDR_ALLCALL, "PCA9685 all-call 广播");
-    probe_verbose(0x68, "IMU (MPU6050 AD0=低)");
-    probe_verbose(0x69, "IMU (MPU6050 AD0=高)");
 
     if (!ok40 || !ok41) {
         ESP_LOGE(TAG, "期望的 PCA9685 未全部应答 —— 常见原因：");
-        ESP_LOGE(TAG, "  1) PCA9685 逻辑电源未供电。本机疑为取自电池那路 5V，");
-        ESP_LOGE(TAG, "     只插 Type-C 而不开电池时，PCA9685 可能没电。");
-        ESP_LOGE(TAG, "  2) SDA/SCL 接线错误，或未共地。");
-        ESP_LOGE(TAG, "自检在此中止，跳过全总线扫描与 PCA9685 初始化。");
-        ESP_LOGE(TAG, "控制台仍会启动，可敲 scan 重试。");
+        ESP_LOGE(TAG, "  1) PCA9685 的逻辑电源未供电（本机实测走 USB 5V，一般不是这个）");
+        ESP_LOGE(TAG, "  2) SDA/SCL 接线错误，或未共地；");
+        ESP_LOGE(TAG, "  3) 模块损坏。");
+        ESP_LOGE(TAG, "自检在此中止，跳过 PCA9685 初始化。控制台仍会启动，可敲 scan 重试。");
         return;
     }
-    ESP_LOGI(TAG, "两片 PCA9685 都在线 ✔");
+    ESP_LOGI(TAG, "两片 PCA9685 都在线 ✔（位操作扫描共发现 %u 个器件）", (unsigned)n_found);
 
-    /* 注意：开机自检**故意不做**全总线扫描。
-       原因（2026-09-19 真机实测）：默认 SCL 超时下，探测一个"不存在"的地址
-       要约 1000 ms，112 个地址就是 ~112 秒 —— 表现就是"开机卡死"。
-       自检必须"快且有界"，所以只做上面那 5 次定向探测。
-       全总线扫描保留为控制台命令 scan（带 3 秒墙钟预算）。 */
     log_separator();
-    ESP_LOGI(TAG, "步骤 4/4：初始化两片 PCA9685（置安全态）+ 回读校验");
+    ESP_LOGI(TAG, "步骤 5/5：初始化两片 PCA9685（置安全态）+ 回读校验");
     for (size_t i = 0; i < P0_BOARD_COUNT; ++i) {
         esp_err_t err = drv_pca9685_init(s_boards[i], DRV_PCA9685_DEFAULT_HZ);
         if (err != ESP_OK) {
@@ -215,7 +235,7 @@ static void cmd_help(void)
 {
     ESP_LOGI(TAG, "可用命令（board: 0=0x40 左, 1=0x41 右）：");
     ESP_LOGI(TAG, "  help                          显示本帮助");
-    ESP_LOGI(TAG, "  scan                          全总线扫描 0x08..0x77（最多 3 秒，带进度）");
+    ESP_LOGI(TAG, "  scan                          全总线扫描 0x08..0x77（位操作，约 20 ms）");
     ESP_LOGI(TAG, "  status                        回读两片板的 MODE1/PRESCALE");
     ESP_LOGI(TAG, "  freq <hz>                     设置频率（默认 50）");
     ESP_LOGI(TAG, "  set <board> <ch> <us>         单通道输出指定脉宽 (500..2500)");
@@ -399,6 +419,12 @@ static void cmd_raw(const char *args)
 
 static void handle_line(char *line)
 {
+    /* 先把整行原样留一份用于回显 —— 下面的拆分会把参数位置改成 '\0'，
+       否则日志里只会看到 "> raw" 而看不到 "raw 0 FE"。 */
+    char echo[P0_LINE_MAX];
+    strncpy(echo, line, sizeof(echo) - 1);
+    echo[sizeof(echo) - 1] = '\0';
+
     /* 取第一个词作为命令 */
     char *cmd = line;
     while (*cmd == ' ') {
@@ -419,12 +445,12 @@ static void handle_line(char *line)
         return;
     }
 
-    ESP_LOGI(TAG, "> %s", cmd);
+    ESP_LOGI(TAG, "> %s", echo);
 
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "?") == 0) {
         cmd_help();
     } else if (strcmp(cmd, "scan") == 0) {
-        do_scan(true);
+        do_scan();
         verify_expected_devices();
     } else if (strcmp(cmd, "status") == 0) {
         cmd_status();

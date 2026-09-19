@@ -189,10 +189,95 @@ esp_err_t bsp_i2c_probe(uint8_t dev)
     return bsp_i2c_probe_timed(dev, NULL);
 }
 
-size_t bsp_i2c_scan(uint8_t *found, size_t max_found)
+/* ==========================================================================
+ * 位操作 I2C 扫描
+ *
+ * 见 bsp_i2c.h 里 bsp_i2c_scan_bitbang() 的说明：IDF 5.1.2 的 legacy 驱动把
+ * 事件等待下限硬编码成 1000 ms，导致"探测失败地址"每次要 1 秒。
+ * 位操作绕开驱动，整条总线约 20 ms。
+ * ========================================================================== */
+
+static void bb_delay(void)
 {
-    if (!s_installed) {
-        ESP_LOGE(TAG, "扫描前必须先 bsp_i2c_init()");
+    esp_rom_delay_us(BSP_I2C_BB_DELAY_US);
+}
+
+static void bb_sda(int level)
+{
+    /* 开漏输出：写 1 = 释放（由上拉拉高），写 0 = 主动拉低 */
+    gpio_set_level(BSP_I2C_SDA_GPIO, level ? 1 : 0);
+}
+
+static void bb_scl(int level)
+{
+    gpio_set_level(BSP_I2C_SCL_GPIO, level ? 1 : 0);
+}
+
+static void bb_start(void)
+{
+    bb_sda(1);
+    bb_scl(1);
+    bb_delay();
+    bb_sda(0);
+    bb_delay();
+    bb_scl(0);
+    bb_delay();
+}
+
+static void bb_stop(void)
+{
+    bb_sda(0);
+    bb_delay();
+    bb_scl(1);
+    bb_delay();
+    bb_sda(1);
+    bb_delay();
+}
+
+/** @return 1 = 收到 ACK，0 = NACK */
+static int bb_write_byte(uint8_t b)
+{
+    for (int i = 7; i >= 0; --i) {
+        bb_sda((b >> i) & 1);
+        bb_delay();
+        bb_scl(1);
+        bb_delay();
+        bb_scl(0);
+        bb_delay();
+    }
+    /* 第 9 个时钟：释放 SDA，看从机是否拉低 */
+    bb_sda(1);
+    bb_delay();
+    bb_scl(1);
+    bb_delay();
+    const int ack = (gpio_get_level(BSP_I2C_SDA_GPIO) == 0);
+    bb_scl(0);
+    bb_delay();
+    return ack;
+}
+
+esp_err_t bsp_i2c_bitbang_begin(void)
+{
+    if (s_installed) {
+        ESP_LOGE(TAG, "位操作扫描需在 I2C 驱动安装前（或 deinit 后）调用");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    gpio_set_direction(BSP_I2C_SCL_GPIO, GPIO_MODE_INPUT_OUTPUT_OD);
+    gpio_set_direction(BSP_I2C_SDA_GPIO, GPIO_MODE_INPUT_OUTPUT_OD);
+    gpio_set_pull_mode(BSP_I2C_SCL_GPIO, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(BSP_I2C_SDA_GPIO, GPIO_PULLUP_ONLY);
+
+    bb_sda(1);
+    bb_scl(1);
+    esp_rom_delay_us(10);
+    return ESP_OK;
+}
+
+size_t bsp_i2c_scan_bitbang(uint8_t *found, size_t max_found)
+{
+    if (s_installed) {
+        ESP_LOGE(TAG, "位操作扫描需在 I2C 驱动安装前（或 deinit 后）调用");
         return 0;
     }
     if (found == NULL || max_found == 0) {
@@ -205,24 +290,20 @@ size_t bsp_i2c_scan(uint8_t *found, size_t max_found)
     bool aborted = false;
 
     for (uint16_t addr = BSP_I2C_ADDR_MIN; addr <= BSP_I2C_ADDR_MAX; ++addr) {
-        const int64_t elapsed_ms = (esp_timer_get_time() - t_start) / 1000;
-
-        /* 最后一道保险：无论单个探测多慢，扫描总时长都不会失控 */
-        if (elapsed_ms > BSP_I2C_SCAN_BUDGET_MS) {
+        /* 位操作本来就快，这里只是防御性的最后一道保险 */
+        if (((esp_timer_get_time() - t_start) / 1000) > BSP_I2C_SCAN_BUDGET_MS) {
             aborted = true;
-            ESP_LOGW(TAG, "  已达墙钟预算 %d ms，扫描在 0x%02X 处提前结束",
+            ESP_LOGW(TAG, "  已达墙钟预算 %d ms，位操作扫描在 0x%02X 处提前结束",
                      BSP_I2C_SCAN_BUDGET_MS, addr);
             break;
         }
-
-        /* 每 16 个地址打一次进度：万一某次探测异常慢，日志能指出卡在哪一段 */
-        if ((probed % 16) == 0) {
-            ESP_LOGI(TAG, "  扫描进度 0x%02X.. (已探测 %u 个, 命中 %u, 已用 %lld ms)",
-                     addr, (unsigned)probed, (unsigned)count, (long long)elapsed_ms);
-        }
         ++probed;
 
-        if (bsp_i2c_probe((uint8_t)addr) == ESP_OK) {
+        bb_start();
+        const int ack = bb_write_byte((uint8_t)(addr << 1)); /* 只发地址 + 读 ACK */
+        bb_stop();
+
+        if (ack) {
             if (count < max_found) {
                 found[count] = (uint8_t)addr;
             }
@@ -230,7 +311,7 @@ size_t bsp_i2c_scan(uint8_t *found, size_t max_found)
         }
     }
 
-    ESP_LOGI(TAG, "  扫描%s: 探测 %u 个地址, 命中 %u 个, 总耗时 %lld ms",
+    ESP_LOGI(TAG, "位操作扫描%s: 探测 %u 个地址, 命中 %u 个, 总耗时 %lld ms",
              aborted ? "(提前结束)" : "完成", (unsigned)probed, (unsigned)count,
              (long long)((esp_timer_get_time() - t_start) / 1000));
     return count;

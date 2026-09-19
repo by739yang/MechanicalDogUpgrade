@@ -28,6 +28,20 @@
    含串口日志、I2C 扫描、PCA9685 单通道驱动与串口控制台。详见 `firmware/README.md`。
 7. 板上 MicroPython 全部 20 个文件（含真实 `config.py`）已备份到
    `_board_backup_20260919/`（该目录被 `.gitignore` 忽略，不会进公开仓库）。
+8. **IDF 5.1.2 legacy I2C 驱动的一个硬陷阱（查源码确认）**：
+   `components/driver/i2c/i2c.c` 里有
+   ```c
+   #define I2C_CMD_ALIVE_INTERVAL_TICK (1000 / portTICK_PERIOD_MS)
+   ```
+   在 `i2c_master_cmd_begin()` 的事件等待循环里，等待时间被**强制抬到不低于
+   1000 ms**。结果是：器件 **ACK** 时 DONE 事件立刻到达（实测 273~491 µs），
+   器件 **NACK** 时**根本不产生事件**，只能干等 1000 ms 后报 `ESP_ERR_TIMEOUT`。
+   ⇒ 探测一个不存在的地址固定要 **1 秒**，112 个地址的全总线扫描要 **112 秒**。
+   `ticks_to_wait` 和 `i2c_set_timeout()` **都改不了**（默认 SCL 超时实测是 8000）。
+   MicroPython 1.13 用的是 IDF 3.3.2，那版没这个下限，所以同样扫描只要 28 ms。
+   **对策**：全总线扫描用 **GPIO 位操作**在驱动安装前做（`bsp_i2c_scan_bitbang()`），
+   约 20 ms；驱动路径只探"确定存在"的地址。这一条对所有后续阶段都适用 ——
+   任何 I2C 错误路径都会有 1 秒延迟，设计超时/重试时必须考虑。
 
 详细的实测数据、脚本与核对清单见《硬件实物核对清单.md》（放在桌面，§0.2.1 与附录 G）
 以及 `diagnostics/` 目录。

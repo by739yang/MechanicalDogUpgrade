@@ -36,22 +36,18 @@ extern "C" {
 #define BSP_I2C_SCAN_TIMEOUT_MS 10
 
 /**
- * I2C 硬件 SCL 超时，单位 = APB 80 MHz 时钟周期。
+ * I2C 硬件 SCL 超时，单位 = APB 80 MHz 时钟周期。80000 ≈ 1 ms。
  *
- * ⚠️ 实测教训（2026-09-19，真机）：
- *   默认值下，探测一个**不存在**的地址耗时约 **1000 ms**！
- *   112 个地址的全总线扫描因此要 ~112 秒，看起来就像"卡死"。
- *   而 MicroPython 版扫同一总线只要 28 ms。
- *   80 000 周期 ≈ 1 ms，把单次失败探测从 ~1 s 压到 ~1 ms 量级。
+ * @note 实测（2026-09-19）：这个值**并不能**缩短"探测失败地址"的耗时，
+ *       真正卡住的是下面注释里那个驱动硬编码。保留它只是为了给总线
+ *       异常情况一个明确的时限。
  */
 #define BSP_I2C_SCL_TIMEOUT_CYCLES 80000
 
-/**
- * 全总线扫描的墙钟预算（毫秒）。超预算就提前结束并如实报告。
- *
- * 无论上面那个超时值最终被解释成什么单位，扫描都不可能失控 —— 这是最后一道保险。
- */
-#define BSP_I2C_SCAN_BUDGET_MS  3000
+/** 位操作扫描的半周期延时（微秒）。5 µs ≈ 100 kHz */
+#define BSP_I2C_BB_DELAY_US     5
+/** 位操作扫描的墙钟预算（毫秒）。正常约 20 ms 就能扫完 112 个地址 */
+#define BSP_I2C_SCAN_BUDGET_MS  2000
 
 /** I2C 扫描地址范围（7 位地址） */
 #define BSP_I2C_ADDR_MIN        0x08
@@ -107,15 +103,44 @@ esp_err_t bsp_i2c_probe_timed(uint8_t dev, int64_t *elapsed_us);
 esp_err_t bsp_i2c_bus_recover(void);
 
 /**
- * @brief 扫描整条总线。
- * @param found      输出缓冲区，存放发现的地址
- * @param max_found  found 的容量
- * @return 发现的器件个数
+ * @brief 扫描整条总线（**位操作实现，不依赖 I2C 驱动**）。
  *
- * @note 用「读 1 字节是否被 ACK」来判断。注意 MicroPython 的 readfrom_mem 在
- *       无器件时可能不报错而返回残留数据，C 版这里依赖 esp_err_t，不会有该问题。
+ * ⚠️ 必须在 bsp_i2c_init() 之前、或 bsp_i2c_deinit() 之后调用。
+ *
+ * ## 为什么不用驱动扫描
+ *
+ * IDF 5.1.2 的 legacy I2C 驱动里有这么一行：
+ * ```c
+ * #define I2C_CMD_ALIVE_INTERVAL_TICK (1000 / portTICK_PERIOD_MS)
+ * ```
+ * 在 `i2c_master_cmd_begin()` 的事件等待循环里，它会把这个等待时间
+ * **强制抬高到不低于 1000 ms**：
+ * ```c
+ * if (wait_time < I2C_CMD_ALIVE_INTERVAL_TICK) {
+ *     wait_time = I2C_CMD_ALIVE_INTERVAL_TICK;   // 永远是 1000 ms
+ * }
+ * xQueueReceive(p_i2c->cmd_evt_queue, &evt, wait_time);
+ * ```
+ * 于是：
+ *   - 器件 **ACK** → DONE 事件立刻到达 → 约 300 µs（实测 273~491 µs）
+ *   - 器件 **NACK** → **根本不产生事件** → 只能干等 1000 ms 后报 ESP_ERR_TIMEOUT
+ *
+ * 实测（2026-09-19 真机）：探测不存在的 `0x68` 耗时 1 000 091 µs。
+ * 112 个地址的全总线扫描因此要约 **112 秒**，看起来就是"开机卡死"。
+ * 传进去的 `ticks_to_wait` 和 `i2c_set_timeout()` **都无法改变**这一点。
+ *
+ * MicroPython 1.13 用的是 IDF 3.3.2，那版驱动没有这个下限，所以同样
+ * 112 个地址只要 28 ms —— 同一份代码换 IDF 版本，行为完全不同。
+ *
+ * 位操作扫描绕开整个驱动，整条总线约 **20 ms**。
  */
-size_t bsp_i2c_scan(uint8_t *found, size_t max_found);
+esp_err_t bsp_i2c_bitbang_begin(void);
+
+/**
+ * @brief 位操作全总线扫描（需先调用 bsp_i2c_bitbang_begin()）。
+ * @return 应答的器件个数；found 里存放地址
+ */
+size_t bsp_i2c_scan_bitbang(uint8_t *found, size_t max_found);
 
 #ifdef __cplusplus
 }
