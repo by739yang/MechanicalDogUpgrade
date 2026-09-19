@@ -1,0 +1,28 @@
+# MechanicalDog P0 -- ESP-IDF sdkconfig defaults
+#
+# IMPORTANT: keep this file PURE ASCII.
+# Reason: ESP-IDF's kconfgen reads this file using the system locale encoding.
+# On a Chinese Windows that is GBK, so UTF-8 multi-byte characters here cause
+#     UnicodeDecodeError: 'gbk' codec can't decode byte ...
+# and the whole CMake configure step fails.
+#
+# Unknown Kconfig names are only ignored with a warning, they do not fail the build.
+
+# Larger main task stack: P0 does logging, scanning and string handling
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Log level: INFO is enough for now
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# 1000 Hz tick, preparing for the fixed-period motion_task later
+CONFIG_FREERTOS_HZ=1000
+
+# Keep console baud in sync with monitor_speed
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# Task watchdog: keep enabled during P0 to catch hangs
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
+# Board has 4 MB flash. Without this, sdkconfig defaults to 2 MB and the build
+# prints: "Flash memory size mismatch detected. Expected 4MB, found 2MB!"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

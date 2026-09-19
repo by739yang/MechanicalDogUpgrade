@@ -22,3 +22,10 @@ _board_backup_*/
 _local_backup_*/
 test/
 *.log
+
+# PlatformIO / ESP-IDF generated
+sdkconfig
+sdkconfig.old
+sdkconfig.esp32dev
+dependencies.lock
+managed_components/
