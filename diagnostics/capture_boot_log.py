@@ -69,22 +69,31 @@ def main():
 
     # 顺手做关键项判定，省得肉眼找
     print("\n---- 关键项自动判定 ----")
-    checks = [
+    present = [
         ("ESP-IDF 版本", "ESP-IDF  :"),
         ("芯片信息", "目标芯片 :"),
         ("Flash 大小", "Flash    :"),
-        ("I2C 就绪", "I2C 就绪"),
-        ("扫描结果", "扫描结果"),
-        ("0x40 存在", "0x40 (左半身) : 存在"),
-        ("0x41 存在", "0x41 (右半身) : 存在"),
-        ("0x70 all-call", "0x70 也在线"),
-        ("无 IMU", "0x68/0x69 无应答"),
-        ("MODE1/PRESCALE", "MODE1="),
-        ("PRESCALE=122 一致", "与 MicroPython 版实测一致"),
+        ("总线恢复完成", "总线已释放"),
+        ("位操作扫描完成", "位操作扫描完成"),
+        ("全扫描命中 3 个", "命中 3 个"),
+        ("扫描结果 0x40/41/70", "扫描结果（3 个）：0x40, 0x41, 0x70"),
+        ("0x40 驱动应答", "0x40  PCA9685 左半身"),
+        ("0x41 驱动应答", "0x41  PCA9685 右半身"),
+        ("0x70 all-call", "0x70  PCA9685 all-call"),
+        ("MODE1=0x21 回读", "MODE1=0x21"),
+        ("PRESCALE=122 与 Python 一致", "与 MicroPython 版实测一致"),
         ("控制台就绪", "控制台就绪"),
     ]
-    for name, needle in checks:
-        print("  %-22s %s" % (name, "✔ 找到" if needle in text else "✘ 没找到"))
+    absent = [
+        ("不该出现'无应答'", "无应答"),
+        ("不该出现崩溃", "Guru Meditation"),
+        ("不该出现看门狗", "Task watchdog got triggered"),
+    ]
+
+    for name, needle in present:
+        print("  %-28s %s" % (name, "✔ 找到" if needle in text else "✘ 没找到"))
+    for name, needle in absent:
+        print("  %-28s %s" % (name, "✔ 干净" if needle not in text else "✘ 出现了！"))
 
 
 main()
