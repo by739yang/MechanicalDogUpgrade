@@ -88,6 +88,20 @@ esp_err_t bsp_i2c_init(void)
         return err;
     }
 
+    /* 收紧硬件 SCL 超时。默认值下探测"不存在的地址"要约 1000 ms，
+       112 个地址的全总线扫描会拖到 ~112 秒（实测）。 */
+    int old_to = 0;
+    (void)i2c_get_timeout(BSP_I2C_PORT, &old_to);
+    err = i2c_set_timeout(BSP_I2C_PORT, BSP_I2C_SCL_TIMEOUT_CYCLES);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "i2c_set_timeout 失败: %s（继续用默认值）", esp_err_to_name(err));
+    } else {
+        int new_to = 0;
+        (void)i2c_get_timeout(BSP_I2C_PORT, &new_to);
+        ESP_LOGI(TAG, "SCL 超时: %d -> %d (APB 80MHz 周期, 约 %d us)",
+                 old_to, new_to, new_to / 80);
+    }
+
     /* 主机模式不需要收发缓冲，故 rx/tx buf 为 0 */
     err = i2c_driver_install(BSP_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
     if (err != ESP_OK) {
@@ -188,13 +202,23 @@ size_t bsp_i2c_scan(uint8_t *found, size_t max_found)
     const int64_t t_start = esp_timer_get_time();
     size_t count = 0;
     size_t probed = 0;
+    bool aborted = false;
 
     for (uint16_t addr = BSP_I2C_ADDR_MIN; addr <= BSP_I2C_ADDR_MAX; ++addr) {
+        const int64_t elapsed_ms = (esp_timer_get_time() - t_start) / 1000;
+
+        /* 最后一道保险：无论单个探测多慢，扫描总时长都不会失控 */
+        if (elapsed_ms > BSP_I2C_SCAN_BUDGET_MS) {
+            aborted = true;
+            ESP_LOGW(TAG, "  已达墙钟预算 %d ms，扫描在 0x%02X 处提前结束",
+                     BSP_I2C_SCAN_BUDGET_MS, addr);
+            break;
+        }
+
         /* 每 16 个地址打一次进度：万一某次探测异常慢，日志能指出卡在哪一段 */
         if ((probed % 16) == 0) {
             ESP_LOGI(TAG, "  扫描进度 0x%02X.. (已探测 %u 个, 命中 %u, 已用 %lld ms)",
-                     addr, (unsigned)probed, (unsigned)count,
-                     (long long)((esp_timer_get_time() - t_start) / 1000));
+                     addr, (unsigned)probed, (unsigned)count, (long long)elapsed_ms);
         }
         ++probed;
 
@@ -206,8 +230,8 @@ size_t bsp_i2c_scan(uint8_t *found, size_t max_found)
         }
     }
 
-    ESP_LOGI(TAG, "  扫描完成: 探测 %u 个地址, 命中 %u 个, 总耗时 %lld ms",
-             (unsigned)probed, (unsigned)count,
+    ESP_LOGI(TAG, "  扫描%s: 探测 %u 个地址, 命中 %u 个, 总耗时 %lld ms",
+             aborted ? "(提前结束)" : "完成", (unsigned)probed, (unsigned)count,
              (long long)((esp_timer_get_time() - t_start) / 1000));
     return count;
 }
