@@ -1,0 +1,14 @@
+{
+    "//": "Project-level VS Code settings. Machine-independent only, safe to commit.",
+    "files.associations": {
+        "*.h": "c",
+        "sdkconfig.defaults": "properties"
+    },
+    "search.exclude": {
+        "**/.pio": true,
+        "**/sdkconfig.esp32dev": true
+    },
+    "files.watcherExclude": {
+        "**/.pio/**": true
+    }
+}

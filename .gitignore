@@ -11,11 +11,19 @@ __pycache__/
 
 # Build and IDE output
 .pio/
-.vscode/.browse
 build/
 *.bin
 *.elf
 *.map
+
+# IDE configs that embed absolute toolchain paths -> keep local only.
+# NOTE: patterns with a slash in the MIDDLE are anchored to this .gitignore's
+# directory, so a bare ".vscode/..." would never match "firmware/.vscode/...".
+# The leading "**/" is what makes them match at any depth.
+**/.vscode/.browse
+**/.vscode/c_cpp_properties.json
+**/.vscode/launch.json
+**/.vscode/*.log
 
 # Local backups and test artifacts
 _board_backup_*/
