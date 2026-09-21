@@ -71,8 +71,9 @@ build\test_kinematics.exe golden\ik.csv
 
 ## 当前结果（2026-09-19）
 
+### kinematics ← PA_IK.py
+
 ```
-kinematics golden test  (C float vs MicroPython double)
 rows     : 74   (case=0 series: 37, case=1 parallel: 37)
 samples  : 592 joint angles compared
 tolerance: 0.500 deg
@@ -86,9 +87,32 @@ per-field max error (deg):
 RESULT: PASS -- max error 0.0000603 deg  (8290x inside the tolerance)
 ```
 
-**结论**：`firmware/src/control/kinematics.c` 与 `PA_IK.py` 数值等价。
-残余的 6e-5 度纯粹是 C `float` 与 Python `double` 的舍入差
+### body_pose ← PA_ATTITUDE.py
+
+```
+rows     : 87
+samples  : 696 foot-target values compared
+tolerance: 0.500 mm
+
+per-field max error (mm):
+  x1  0.000011874   y1  0.000022257
+  x2  0.000011874   y2  0.000021105
+  x3  0.000008295   y3  0.000022257     (x3/y3 对应腿4)
+  x4  0.000008295   y4  0.000014321     (x4/y4 对应腿3)
+
+RESULT: PASS -- max error 0.000022257 mm  (22465x inside the tolerance)
+```
+
+**结论**：两个模块都与 MicroPython 参考**数值等价**。
+残余误差量级 1e-5 ~ 6e-5，纯粹是 C `float` 与 Python `double` 的舍入差
 （固件刻意用 `float`：ESP32 只有单精度硬件 FPU，`double` 是软件模拟，慢一两个数量级）。
+
+### 迁移中发现的两处原实现问题
+
+| 位置 | 问题 | 处置 |
+|---|---|---|
+| `PA_IK.py` | `acos`/`asin` 参数不检查定义域，越界抛 `ValueError` | C 版 clamp 到 [-1,1]；迁移表要求"异常输入不产生 NaN" |
+| `PA_ATTITUDE.cal_ges()` | 算了 `AB1_y..AB4_y` 四个横向坐标，但**返回值里没有它们**（纯无效计算）；而形参 `w`（左右腿间距）**只被这四个式子使用** ⇒ **`w` 对输出毫无影响** | C 版删掉无效计算（删后 golden 误差一位不差，实证其无效）；保留 `w` 形参以维持签名一致并注明 |
 
 ---
 
@@ -103,8 +127,8 @@ RESULT: PASS -- max error 0.0000603 deg  (8290x inside the tolerance)
 
 | 模块 | 参考来源 | 状态 |
 |---|---|---|
-| `kinematics.c` | `PA_IK.py` | ✅ 通过（592 项，6e-5°） |
-| `body_pose.c` | `PA_ATTITUDE.py` | ⬜ 待做 |
+| `kinematics.c` | `PA_IK.py` | ✅ 通过（592 项，最大 6.0e-5°） |
+| `body_pose.c` | `PA_ATTITUDE.py` | ✅ 通过（696 项，最大 2.2e-5 mm） |
 | `gait_trot.c` | `PA_TROT.py` | ⬜ 待做（需 `machine`/`padog` stub） |
 | `gait_walk.c` | `PA_WALK.py` | ⬜ 待做（同上） |
 | `filter_moving_avg.c` | `PA_AVGFILT.py` | ⬜ 待做 |

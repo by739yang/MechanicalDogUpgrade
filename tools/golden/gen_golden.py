@@ -125,6 +125,57 @@ def gen_ik(ns, fh):
     return rows
 
 
+def gen_body_pose(ns, fh):
+    """PA_ATTITUDE.cal_ges —— 俯仰/滚转/X偏移 -> 四足足端目标
+
+    ⚠️ 注意原实现返回顺序是 (AB1_x, AB2_x, AB4_x, AB3_x, AB1_z, AB2_z, AB4_z, AB3_z)
+       —— 第 3、4 项对应**腿4 和 腿3**（交换过）。CSV 按位置记录，C 版照样复刻。
+    """
+    cal_ges = ns["cal_ges"]
+
+    # 真实几何与姿态限幅（config_s.py: l=230 b=120 w=220；config.py: pit/rol_max_ang=15）
+    L, B, W = 230.0, 120.0, 220.0
+    PIT_MAX, ROL_MAX = 15.0, 15.0
+
+    fh.write("# PA_ATTITUDE.cal_ges golden vectors\n")
+    fh.write("# 由 tools/golden/gen_golden.py 从 micropython/PA_ATTITUDE.py 直接 exec 生成\n")
+    fh.write("# 列: pit,rol,l,b,w,x,hc,x1,x2,x3,x4,y1,y2,y3,y4\n")
+    fh.write("# 注意: 输出的 x3 对应腿4, x4 对应腿3（原实现交换过）\n")
+    fh.write("pit,rol,l,b,w,x,hc,x1,x2,x3,x4,y1,y2,y3,y4\n")
+
+    cases = []
+    # 1) 显式覆盖：零姿态、单轴极值、双轴组合、X 偏移极值
+    for pit in (0.0, PIT_MAX, -PIT_MAX):
+        for rol in (0.0, ROL_MAX, -ROL_MAX):
+            for xoff in (0.0, 40.0, -40.0):
+                cases.append((pit, rol, xoff))
+    # 2) 固定种子随机（在限幅内）
+    rnd = random.Random(20260920)
+    for _ in range(60):
+        cases.append((
+            round(rnd.uniform(-PIT_MAX, PIT_MAX), 4),
+            round(rnd.uniform(-ROL_MAX, ROL_MAX), 4),
+            round(rnd.uniform(-60.0, 60.0), 4),
+        ))
+    # 3) 几组不同的站高（Hc 变化）
+    hs = [169.0, 200.0, 219.0, 259.0]
+
+    rows = 0
+    for i, (pit, rol, xoff) in enumerate(cases):
+        hc = hs[i % len(hs)]
+        out = cal_ges(pit, rol, L, B, W, xoff, hc)
+        if any(v is None or math.isnan(v) for v in out):
+            continue
+        fh.write("%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%s\n" % (
+            pit, rol, L, B, W, xoff, hc,
+            ",".join("%.9f" % v for v in out),
+        ))
+        rows += 1
+
+    print("  body_pose golden 行数: %d" % rows)
+    return rows
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -136,12 +187,19 @@ def main():
     print("仓库根: %s" % ROOT)
     print("输出目录: %s" % OUT)
 
-    print("\n[1/1] IK ...")
+    total = 0
+
+    print("\n[1/2] PA_IK -> kinematics.c ...")
     ns_ik = load_module("PA_IK.py")
     with open(OUT / "ik.csv", "w", encoding="utf-8", newline="\n") as fh:
-        n = gen_ik(ns_ik, fh)
+        total += gen_ik(ns_ik, fh)
 
-    print("\n完成。共 1 个 suite, %d 行。" % n)
+    print("\n[2/2] PA_ATTITUDE -> body_pose.c ...")
+    ns_att = load_module("PA_ATTITUDE.py")
+    with open(OUT / "body_pose.csv", "w", encoding="utf-8", newline="\n") as fh:
+        total += gen_body_pose(ns_att, fh)
+
+    print("\n完成。共 2 个 suite, %d 行。" % total)
     print("提示：这些 CSV 要提交进仓库，C 版测试只读它们。")
 
 
