@@ -257,6 +257,55 @@ def gen_gait_trot(ns, fh):
     return rows
 
 
+def gen_moving_avg(ns, fh):
+    """PA_AVGFILT.avg_filiter —— 滑动平均（**有状态**，所以测的是一串调用序列）
+
+    原实现的一个关键细节：窗口大小 = `len(cache_data) - 3`。
+    cache 的前 3 个槽被挪用为「长度标记 / 累加和 / 未用」，真正的数据窗口在后面：
+      - `array('i',[0]*5)`  → 窗口 **2**（PA_STABLIZE 用）
+      - `array('i',[0]*10)` → 窗口 **7**（PA_WALK 用）
+
+    另一个细节：返回的是 `self.cache[1] // (len-3)` —— **整数向下取整**。
+    Python 的 `//` 对负数向 -∞ 取整，C 的 `/` 向 0 截断，两者不同，必须复刻。
+    """
+    from array import array
+
+    cls = ns["avg_filiter"]
+
+    # (cache 长度, 说明)：分别对应 PA_STABLIZE 和 PA_WALK 的实际用法
+    setups = [
+        (5, "PA_STABLIZE / PA_AVGFILT 默认用法 -> 窗口 2"),
+        (10, "PA_WALK 用法 -> 窗口 7"),
+    ]
+
+    fh.write("# PA_AVGFILT.avg_filiter golden vectors\n")
+    fh.write("# 由 tools/golden/gen_golden.py 从 micropython/PA_AVGFILT.py 直接 exec 生成\n")
+    fh.write("# ⚠️ 这是一串**调用序列**：同一 window 的行必须按 step 递增顺序喂给同一个滤波器实例\n")
+    fh.write("# 列: window,step,in,out\n")
+    fh.write("# window = 窗口大小 = len(cache_data) - 3\n")
+    fh.write("# out 是整数（Python 的 // 向下取整）\n")
+    fh.write("window,step,in,out\n")
+
+    rows = 0
+    for (clen, note) in setups:
+        fh.write("# %s (cache len=%d)\n" % (note, clen))
+        filt = cls(array("i", [0] * clen))
+        w = clen - 3
+
+        # 值序列：0、正、负、交替、大值 —— 覆盖累加与负数的向下取整
+        vals = [0, 10, 20, 30, -5, -25, 100, 7, -7, 0, 32767, -32768]
+        rnd = random.Random(20260921)
+        vals += [rnd.randint(-3000, 3000) for _ in range(120)]
+
+        for step, v in enumerate(vals):
+            out = filt.avg(v)
+            fh.write("%d,%d,%d,%d\n" % (w, step, v, out))
+            rows += 1
+
+    print("  moving_avg golden 行数: %d（窗口 2 与 7）" % rows)
+    return rows
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -273,22 +322,27 @@ def main():
 
     total = 0
 
-    print("\n[1/3] PA_IK -> kinematics.c ...")
+    print("\n[1/4] PA_IK -> kinematics.c ...")
     ns_ik = load_module("PA_IK.py")
     with open(OUT / "ik.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_ik(ns_ik, fh)
 
-    print("\n[2/3] PA_ATTITUDE -> body_pose.c ...")
+    print("\n[2/4] PA_ATTITUDE -> body_pose.c ...")
     ns_att = load_module("PA_ATTITUDE.py")
     with open(OUT / "body_pose.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_body_pose(ns_att, fh)
 
-    print("\n[3/3] PA_TROT -> gait_trot.c ...")
+    print("\n[3/4] PA_TROT -> gait_trot.c ...")
     ns_trot = load_module("PA_TROT.py")
     with open(OUT / "gait_trot.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_gait_trot(ns_trot, fh)
 
-    print("\n完成。共 3 个 suite, %d 行。" % total)
+    print("\n[4/4] PA_AVGFILT -> filter_moving_avg.c ...")
+    ns_flt = load_module("PA_AVGFILT.py")
+    with open(OUT / "moving_avg.csv", "w", encoding="utf-8", newline="\n") as fh:
+        total += gen_moving_avg(ns_flt, fh)
+
+    print("\n完成。共 4 个 suite, %d 行。" % total)
     print("提示：这些 CSV 要提交进仓库，C 版测试只读它们。")
 
 

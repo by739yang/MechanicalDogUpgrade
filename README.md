@@ -20,9 +20,10 @@
 │       ├── bsp/                # bsp_i2c：I2C 总线、扫描、位操作扫描
 │       ├── drivers/            # drv_pca9685：双板 PCA9685 驱动
 │       ├── control/            # 纯数学模块（从 PA_*.py 迁移）
-│       │   ├── kinematics      #   逆运动学     ← PA_IK.py
-│       │   ├── body_pose       #   机身姿态→足端 ← PA_ATTITUDE.py
-│       │   └── gait_trot       #   TROT 步态     ← PA_TROT.py
+│       │   ├── kinematics       #   逆运动学        ← PA_IK.py
+│       │   ├── body_pose        #   机身姿态→足端   ← PA_ATTITUDE.py
+│       │   ├── gait_trot        #   TROT 步态       ← PA_TROT.py
+│       │   └── filter_moving_avg#   滑动平均(有状态) ← PA_AVGFILT.py
 │       └── app/                # app_p0：P0 自检 + 串口控制台
 ├── tools/
 │   └── golden/                 # 宿主侧 golden 对照测试（不用烧板子）
@@ -65,7 +66,7 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **P0** | 工程、日志、I2C 扫描、PCA9685 单通道控制 | ✅ **完成**（2026-09-19 上机验收） |
-| P1 | 配置迁移 NVS + 逆运动学 + 姿态/步态纯数学 | 🟡 **进行中** — golden 测试台已建并跑通 3 套（合计 9608 项，最大误差 ≤ 6.0e-5）；已迁移 `kinematics.c` / `body_pose.c` / `gait_trot.c`；待做 `gait_walk.c` / `filter_moving_avg.c` / NVS 配置 |
+| P1 | 配置迁移 NVS + 逆运动学 + 姿态/步态纯数学 | 🟡 **进行中** — golden 测试台已跑通 4 套（合计 9872 项，最大误差 ≤ 6.0e-5，整数滤波器精确相等）；已迁移 `kinematics.c` / `body_pose.c` / `gait_trot.c` / `filter_moving_avg.c`；待做 `gait_walk.c` / NVS 配置 |
 | P2 | 固定周期运动循环 + 12 路舵机输出 | ⬜ 未开始 |
 | P3 | TROT / WALK 步态与姿态数学 | ⬜ 未开始 |
 | P4 | IMU 与稳定控制 | ⛔ 本机无 IMU（决策 F1 = A：暂不加装，P4 再议） |

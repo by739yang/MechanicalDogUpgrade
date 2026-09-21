@@ -121,7 +121,41 @@ RESULT: PASS -- max error 0.000019430 mm  (51467x inside the tolerance)
 覆盖了 4 组时序参数（含实机值 `Ts=1.0 / faai=0.42`）、5 组运动参数、4 组腿系数，
 时间采样刻意取到三个边界（`t=0`、`t=faai*Ts`、`t=Ts` 附近）以覆盖两个分支。
 
-**结论**：三个模块都与 MicroPython 参考**数值等价**。
+### moving_avg ← PA_AVGFILT.py（**有状态**，测的是一串调用序列）
+
+```
+rows        : 264   (stateful: rows are fed in order)
+windows     : 2, 7
+mismatches  : 0
+
+RESULT: PASS -- all 264 outputs match exactly
+```
+
+这个模块的测法和其他三个不同：CSV 是**一串按顺序的调用**，同一 `window` 的行
+必须依次喂给同一个滤波器实例（遇到新 `window` 就重新初始化）。
+输出是**整数**，所以要求精确相等，没有容差。
+
+原实现有个**移植陷阱**：`return self.cache[1] // (self.len - 3)` 用的是 Python 的 `//`，
+对负数**向 -∞ 取整**；而 C 的 `/` 是**向 0 截断**。陀螺仪原始值有负数，所以这是真实差异。
+`filter_moving_avg.c` 显式实现了向下取整。
+
+### ✅ 验证验证器：测试真的有牙齿吗
+
+一次"故意搞破坏"的实验 —— 把 `filter_moving_avg.c` 里的向下取整修正抽掉
+（等价于让它退化成 C 的截断除法），重跑同一个测试：
+
+```
+FIRST MISMATCH: window=2 step=9 in=0 expected=-4 got=-3
+mismatches  : 101
+RESULT: FAIL -- 101 of 264 outputs differ
+```
+
+**264 项里 101 项不符，第一个错就在负数取整上。** 这说明测试不是"假装通过"。
+
+> 你也可以自己做这个实验：随便改一下某个系数，或者删掉一行修正，重跑 `run_golden.bat`。
+> **应该立刻 FAIL。** 如果改坏了它还 PASS，那才是真问题。
+
+**结论**：四个模块都与 MicroPython 参考**数值等价**（整数滤波器为精确相等）。
 残余误差量级 8e-6 ~ 6e-5，纯粹是 C `float` 与 Python `double` 的舍入差
 （固件刻意用 `float`：ESP32 只有单精度硬件 FPU，`double` 是软件模拟，慢一两个数量级）。
 
@@ -178,5 +212,5 @@ python check_mpy_loadable.py
 | `kinematics.c` | `PA_IK.py` | ✅ 通过（592 项，最大 6.0e-5°） |
 | `body_pose.c` | `PA_ATTITUDE.py` | ✅ 通过（696 项，最大 2.2e-5 mm） |
 | `gait_trot.c` | `PA_TROT.py` | ✅ 通过（8320 项，最大 1.9e-5 mm） |
-| `gait_walk.c` | `PA_WALK.py` | ⬜ 待做（stub 已就绪） |
-| `filter_moving_avg.c` | `PA_AVGFILT.py` | ⬜ 待做 |
+| `filter_moving_avg.c` | `PA_AVGFILT.py` | ✅ 通过（264 项，整数精确相等） |
+| `gait_walk.c` | `PA_WALK.py` | ⬜ 待做（stub 已就绪；注意它内部会调 `padog.gesture()` 改重心，移植时要变成显式输出） |
