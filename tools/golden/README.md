@@ -103,16 +103,64 @@ per-field max error (mm):
 RESULT: PASS -- max error 0.000022257 mm  (22465x inside the tolerance)
 ```
 
-**结论**：两个模块都与 MicroPython 参考**数值等价**。
-残余误差量级 1e-5 ~ 6e-5，纯粹是 C `float` 与 Python `double` 的舍入差
+### gait_trot ← PA_TROT.py
+
+```
+rows     : 1040
+samples  : 8320 trajectory values compared
+tolerance: 1.000 mm
+
+per-field max error (mm):
+  x1..x4   0.000007750
+  y1,y3    0.000019430
+  y2,y4    0.000007629
+
+RESULT: PASS -- max error 0.000019430 mm  (51467x inside the tolerance)
+```
+
+覆盖了 4 组时序参数（含实机值 `Ts=1.0 / faai=0.42`）、5 组运动参数、4 组腿系数，
+时间采样刻意取到三个边界（`t=0`、`t=faai*Ts`、`t=Ts` 附近）以覆盖两个分支。
+
+**结论**：三个模块都与 MicroPython 参考**数值等价**。
+残余误差量级 8e-6 ~ 6e-5，纯粹是 C `float` 与 Python `double` 的舍入差
 （固件刻意用 `float`：ESP32 只有单精度硬件 FPU，`double` 是软件模拟，慢一两个数量级）。
 
-### 迁移中发现的两处原实现问题
+---
+
+## 怎么让 `import machine` / `import padog` 的模块也能在电脑上跑
+
+`PA_TROT.py` 顶层有 `from machine import I2C, Pin` 和 `import padog`；
+`PA_WALK.py` 的函数内部会 `import PA_SERVO`。这些在 CPython 里都会失败。
+
+`mpy_stubs.py` 往 `sys.modules` 里塞两个**最小假模块**：
+- `machine`：只让 `I2C` / `Pin` / `PWM` 这些名字存在（构造即抛异常，防止被真用）
+- `padog`：提供 `R_H` / `gesture()` 等属性，让 `PA_WALK` 走正常路径而不是被 except 兜住
+
+**设计原则**：stub 只提供名字与最小属性，**不实现任何硬件行为**。
+如果某个"纯数学"模块真的调用了硬件路径，生成参考值时就会报错 ——
+那说明"纯数学"的判断错了，该换策略，而不是给 stub 加实现去掩盖。
+
+`check_mpy_loadable.py` 用来快速验证：装上 stub 后哪些模块能加载、关键函数能否调用。
+加新模块前先跑它。
+
+```powershell
+python check_mpy_loadable.py
+```
+
+---
+
+## 迁移中发现的三处原实现问题
 
 | 位置 | 问题 | 处置 |
 |---|---|---|
 | `PA_IK.py` | `acos`/`asin` 参数不检查定义域，越界抛 `ValueError` | C 版 clamp 到 [-1,1]；迁移表要求"异常输入不产生 NaN" |
 | `PA_ATTITUDE.cal_ges()` | 算了 `AB1_y..AB4_y` 四个横向坐标，但**返回值里没有它们**（纯无效计算）；而形参 `w`（左右腿间距）**只被这四个式子使用** ⇒ **`w` 对输出毫无影响** | C 版删掉无效计算（删后 golden 误差一位不差，实证其无效）；保留 `w` 形参以维持签名一致并注明 |
+| `PA_TROT.cal_t()` | **只有两个分支，没有 else** —— `t > Ts` 会 `UnboundLocalError`；且 `Ts`/`faai` 是模块级全局（隐藏状态） | C 版：时序参数改成显式入参；对 `t<0 \|\| t>Ts` 做相位回绕（`t==Ts` 不回绕，保持与原实现一致） |
+
+## 已知可改进项
+
+三个 `test_*.c` 的比对/报告逻辑高度重复（各约 120 行）。等第 4 个测试出现时
+抽成一个 `golden_util.h` 共享头。现在先保持每个测试文件自包含、便于单读。
 
 ---
 
@@ -129,6 +177,6 @@ RESULT: PASS -- max error 0.000022257 mm  (22465x inside the tolerance)
 |---|---|---|
 | `kinematics.c` | `PA_IK.py` | ✅ 通过（592 项，最大 6.0e-5°） |
 | `body_pose.c` | `PA_ATTITUDE.py` | ✅ 通过（696 项，最大 2.2e-5 mm） |
-| `gait_trot.c` | `PA_TROT.py` | ⬜ 待做（需 `machine`/`padog` stub） |
-| `gait_walk.c` | `PA_WALK.py` | ⬜ 待做（同上） |
+| `gait_trot.c` | `PA_TROT.py` | ✅ 通过（8320 项，最大 1.9e-5 mm） |
+| `gait_walk.c` | `PA_WALK.py` | ⬜ 待做（stub 已就绪） |
 | `filter_moving_avg.c` | `PA_AVGFILT.py` | ⬜ 待做 |

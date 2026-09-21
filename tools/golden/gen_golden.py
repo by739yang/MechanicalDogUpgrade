@@ -23,6 +23,10 @@ ROOT = Path(__file__).resolve().parents[2]
 MPY = ROOT / "micropython"
 OUT = Path(__file__).resolve().parent / "golden"
 
+# 让 PA_TROT / PA_WALK 这类 import machine / padog 的纯数学模块也能加载
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import mpy_stubs  # noqa: E402
+
 # 真实几何参数（config_s.py 实测值）
 L1 = 130.0
 L2 = 138.0
@@ -176,6 +180,83 @@ def gen_body_pose(ns, fh):
     return rows
 
 
+def gen_gait_trot(ns, fh):
+    """PA_TROT.cal_t —— TROT 小跑步态轨迹
+
+    ⚠️ 原实现的形参顺序是 `(t, xs, xf, h, r1, r4, r2, r3)` —— 注意是 r1,r4,r2,r3，
+       不是 r1,r2,r3,r4。CSV 按这个原顺序记录，C 版也保持同样签名。
+
+    ⚠️ `cal_t` 读的是模块级全局 `Ts` / `faai`，而 padog.py 运行时会用
+       `_sync_pa_step_timing()` 从 config 同步进来。实测运行值：
+         Ts   = 1.0   （config.py）
+         faai = 0.42  （config_s.py 覆盖了 config.py 的 0.5）
+       所以 CSV 里把 ts / faai 作为显式输入记录，C 版也改成显式参数（消除隐藏状态）。
+    """
+    cal_t = ns["cal_t"]
+
+    # (ts, faai)：实机运行值 + 模块默认值 + 两个变化值，检验对时序参数的敏感性
+    timing = [(1.0, 0.42), (1.0, 0.5), (1.0, 0.30), (0.8, 0.42)]
+
+    # (xs, xf, h)：xf 来自 padog 的 `spd*10*0.90*_xgs`，h 来自 `h*0.96*...`
+    # 实机 spd=3 时约 xf=38.2 / h=38.7
+    motion = [
+        (0.0, 38.2, 38.7),     # 接近实机巡航
+        (0.0, 60.0, 65.0),     # 大步幅
+        (-20.0, 40.0, 50.0),   # 起止点不同
+        (10.0, -40.0, 30.0),   # 反向
+        (0.0, 0.0, 40.0),      # 零步幅（原地抬腿）
+    ]
+
+    # 腿系数（自然顺序 leg1..leg4）。Python 形参是 (r1,r4,r2,r3)，下面按此重排。
+    rsets = [
+        (1.0, 1.0, 1.0, 1.0),
+        (1.0, 1.0, -1.0, -1.0),
+        (0.0, 1.0, 0.0, 1.0),
+        (-1.0, 1.0, -1.0, 1.0),
+    ]
+
+    fh.write("# PA_TROT.cal_t golden vectors\n")
+    fh.write("# 由 tools/golden/gen_golden.py 从 micropython/PA_TROT.py 直接 exec 生成\n")
+    fh.write("# 列: ts,faai,t,xs,xf,h,r1,r4,r2,r3,x1,x2,x3,x4,y1,y2,y3,y4\n")
+    fh.write("# 注意: r 的顺序与原实现一致，是 r1,r4,r2,r3\n")
+    fh.write("ts,faai,t,xs,xf,h,r1,r4,r2,r3,x1,x2,x3,x4,y1,y2,y3,y4\n")
+
+    rows = 0
+    skipped = 0
+    for (ts, faai) in timing:
+        ns["Ts"] = ts
+        ns["faai"] = faai
+        stance = faai * ts
+        swing = ts - stance
+
+        # 时间采样：显式覆盖两个分支与三个边界（t=0、t=faai*Ts、t=Ts）
+        tset = [0.0, stance]
+        for f in (0.1, 0.3, 0.5, 0.7, 0.9, 0.99):
+            tset.append(stance * f)
+        for f in (0.01, 0.25, 0.5, 0.75, 0.99):
+            tset.append(stance + swing * f)
+        tset = sorted(set(round(v, 9) for v in tset))
+
+        for t in tset:
+            if t > ts:
+                continue
+            for (xs, xf, h) in motion:
+                for (l1r, l2r, l3r, l4r) in rsets:
+                    try:
+                        out = cal_t(t, xs, xf, h, l1r, l4r, l2r, l3r)
+                    except Exception:
+                        skipped += 1
+                        continue
+                    fh.write("%.6f,%.6f,%.9f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%s\n" % (
+                        ts, faai, t, xs, xf, h, l1r, l4r, l2r, l3r,
+                        ",".join("%.9f" % v for v in out),
+                    ))
+                    rows += 1
+
+    print("  gait_trot golden 行数: %d（跳过 %d）" % (rows, skipped))
+    return rows
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -187,19 +268,27 @@ def main():
     print("仓库根: %s" % ROOT)
     print("输出目录: %s" % OUT)
 
+    # PA_TROT / PA_WALK 顶层会 import machine / padog，先装上最小 stub
+    mpy_stubs.install()
+
     total = 0
 
-    print("\n[1/2] PA_IK -> kinematics.c ...")
+    print("\n[1/3] PA_IK -> kinematics.c ...")
     ns_ik = load_module("PA_IK.py")
     with open(OUT / "ik.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_ik(ns_ik, fh)
 
-    print("\n[2/2] PA_ATTITUDE -> body_pose.c ...")
+    print("\n[2/3] PA_ATTITUDE -> body_pose.c ...")
     ns_att = load_module("PA_ATTITUDE.py")
     with open(OUT / "body_pose.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_body_pose(ns_att, fh)
 
-    print("\n完成。共 2 个 suite, %d 行。" % total)
+    print("\n[3/3] PA_TROT -> gait_trot.c ...")
+    ns_trot = load_module("PA_TROT.py")
+    with open(OUT / "gait_trot.csv", "w", encoding="utf-8", newline="\n") as fh:
+        total += gen_gait_trot(ns_trot, fh)
+
+    print("\n完成。共 3 个 suite, %d 行。" % total)
     print("提示：这些 CSV 要提交进仓库，C 版测试只读它们。")
 
 
