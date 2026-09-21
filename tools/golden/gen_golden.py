@@ -306,6 +306,107 @@ def gen_moving_avg(ns, fh):
     return rows
 
 
+def gen_gait_walk(ns, fh):
+    """PA_WALK.cal_w —— WALK 四足顺序步态
+
+    ⚠️ 这个模块有个**副作用**：`cal_w` 内部会调 `_apply_cg()`，
+       而 `_apply_cg()` 会执行 `padog.gesture(0, int(CG_X), int(yst))`
+       —— **改的是 padog 的姿态目标**。C 版必须把它变成显式输出。
+
+    ⚠️ `_body_h()` 读 `padog.R_H`，`_read_gyro_p()` 在无 IMU 时返回 0。
+       两者都通过 stub 控制，以便生成确定性的参考值。
+
+    ⚠️ 形参顺序同样是 `(..., t, r1, r4, r2, r3)`。
+    """
+    cal_w = ns["cal_w"]
+    padog = sys.modules["padog"]
+
+    captured = {}
+
+    def recorder(pit, rol, x):
+        captured["pit"] = pit
+        captured["rol"] = rol
+        captured["x"] = x
+
+    padog.gesture = recorder
+
+    # 参数空间较大，用固定种子采样而不是全笛卡尔积，控制 CSV 规模
+    timing = [(1.0, 0.30), (1.0, 0.42), (1.0, 0.5)]   # 实机 walk_faai=0.30
+    rnd = random.Random(20260922)
+
+    fh.write("# PA_WALK.cal_w golden vectors\n")
+    fh.write("# 由 tools/golden/gen_golden.py 从 micropython/PA_WALK.py 直接 exec 生成\n")
+    fh.write("# 列: ts,faai,cg_x,cg_y,l,xf,h,t,r1,r4,r2,r3,body_h,gyro,"
+             "x1,x2,x3,x4,y1,y2,y3,y4,gpit,grol,gx\n")
+    fh.write("# gpit/grol/gx 是原实现 padog.gesture(0, int(CG_X), int(yst)) 的三个实参\n")
+    fh.write("# grol = int(cg_x) 向零截断；gx = int(yst)，注意不是四舍五入\n")
+    fh.write("ts,faai,cg_x,cg_y,l,xf,h,t,r1,r4,r2,r3,body_h,gyro,"
+             "x1,x2,x3,x4,y1,y2,y3,y4,gpit,grol,gx\n")
+
+    cases = []
+    # 腿系数（自然顺序 leg1..leg4）。**必须含非对称值**，否则测不出原实现
+    # 形参 (r1,r4,r2,r3) 的错位映射 —— 全是 1 的话映射错了也照样"通过"。
+    rsets = [
+        (1.0, 1.0, 1.0, 1.0),
+        (1.0, -1.0, 0.5, -2.0),
+        (0.0, 1.0, -1.0, 0.0),
+        (-1.5, 1.0, 1.0, -1.5),
+    ]
+    # 1) 显式边界：xf=0（走 _xs_xf 特例）、cg_x 负数（测 int() 向零截断 vs 地板）
+    for (ts, faai) in timing:
+        cycle = 4.0 * faai * ts
+        for tf in (0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 0.999):
+            for ri in (0, 1):
+                cases.append((ts, faai, cycle * tf, 0.0, 0.0, 38.7, 110.0, 0.0, ri))
+                cases.append((ts, faai, cycle * tf, 38.2, -7.5, 60.0, 140.0, -3.0, ri))
+    # 2) 随机采样：覆盖三个 _apply_cg 分支、不同步幅/高度/重心/陀螺/腿系数
+    for _ in range(900):
+        ts, faai = timing[rnd.randrange(len(timing))]
+        cycle = 4.0 * faai * ts
+        cases.append((
+            ts, faai,
+            round(rnd.uniform(0.0, cycle * 0.999), 6),
+            rnd.choice([0.0, 20.0, 38.2, -30.0, 60.0]),
+            rnd.choice([0.0, 12.0, -7.5, 30.0]),
+            rnd.choice([38.7, 50.0, 65.0]),
+            rnd.choice([110.0, 140.0, 180.0]),
+            rnd.choice([0.0, 0.0, 2.0, -3.0, 5.0]),
+            rnd.randrange(len(rsets)),
+        ))
+
+    rows = 0
+    skipped = 0
+    for (ts, faai, t, xf, cg_x, h, bh, gy, ri) in cases:
+        l1r, l2r, l3r, l4r = rsets[ri]
+        ns["Ts"] = ts
+        ns["faai"] = faai
+        padog.R_H = bh
+        ns["_read_gyro_p"] = (lambda g: (lambda: g))(gy)
+        captured.clear()
+        try:
+            # 按原实现形参顺序传：(..., t, r1, r4, r2, r3)
+            out = cal_w(cg_x, 28.0, 230.0, xf, h, t, l1r, l4r, l2r, l3r)
+        except Exception:
+            skipped += 1
+            continue
+        if not captured:
+            skipped += 1
+            continue
+        fh.write(
+            "%.6f,%.6f,%.4f,%.1f,%.1f,%.6f,%.6f,%.6f,"
+            "%.4f,%.4f,%.4f,%.4f,%.1f,%.1f,%s,%d,%d,%d\n" % (
+                ts, faai, cg_x, 28.0, 230.0, xf, h, t,
+                l1r, l4r, l2r, l3r, bh, gy,
+                ",".join("%.9f" % v for v in out),
+                captured["pit"], captured["rol"], captured["x"],
+            ))
+        rows += 1
+
+    padog.gesture = lambda *a, **k: None
+    print("  gait_walk golden 行数: %d（跳过 %d）" % (rows, skipped))
+    return rows
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -322,27 +423,32 @@ def main():
 
     total = 0
 
-    print("\n[1/4] PA_IK -> kinematics.c ...")
+    print("\n[1/5] PA_IK -> kinematics.c ...")
     ns_ik = load_module("PA_IK.py")
     with open(OUT / "ik.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_ik(ns_ik, fh)
 
-    print("\n[2/4] PA_ATTITUDE -> body_pose.c ...")
+    print("\n[2/5] PA_ATTITUDE -> body_pose.c ...")
     ns_att = load_module("PA_ATTITUDE.py")
     with open(OUT / "body_pose.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_body_pose(ns_att, fh)
 
-    print("\n[3/4] PA_TROT -> gait_trot.c ...")
+    print("\n[3/5] PA_TROT -> gait_trot.c ...")
     ns_trot = load_module("PA_TROT.py")
     with open(OUT / "gait_trot.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_gait_trot(ns_trot, fh)
 
-    print("\n[4/4] PA_AVGFILT -> filter_moving_avg.c ...")
+    print("\n[4/5] PA_AVGFILT -> filter_moving_avg.c ...")
     ns_flt = load_module("PA_AVGFILT.py")
     with open(OUT / "moving_avg.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_moving_avg(ns_flt, fh)
 
-    print("\n完成。共 4 个 suite, %d 行。" % total)
+    print("\n[5/5] PA_WALK -> gait_walk.c ...")
+    ns_walk = load_module("PA_WALK.py")
+    with open(OUT / "gait_walk.csv", "w", encoding="utf-8", newline="\n") as fh:
+        total += gen_gait_walk(ns_walk, fh)
+
+    print("\n完成。共 5 个 suite, %d 行。" % total)
     print("提示：这些 CSV 要提交进仓库，C 版测试只读它们。")
 
 

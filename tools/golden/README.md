@@ -121,6 +121,41 @@ RESULT: PASS -- max error 0.000019430 mm  (51467x inside the tolerance)
 覆盖了 4 组时序参数（含实机值 `Ts=1.0 / faai=0.42`）、5 组运动参数、4 组腿系数，
 时间采样刻意取到三个边界（`t=0`、`t=faai*Ts`、`t=Ts` 附近）以覆盖两个分支。
 
+### gait_walk ← PA_WALK.py（含一个**副作用**）
+
+```
+rows        : 984
+foot samples: 7872  (tolerance 1.000 mm)
+gesture     : 2952  (exact integer match required)
+
+per-field max error (mm):  1.2e-5 ~ 6.7e-5
+worst foot case: x4  expected=20.0850232  got=20.0850906  err=0.0000674
+gesture mismatches: 0
+
+RESULT: PASS -- foot max error 0.000067425 mm (14831x inside 1.000 mm), gestures exact
+```
+
+**这个模块最有意思的地方:原实现有副作用。**
+
+`cal_w()` 内部会调 `_apply_cg()`，而后者执行 `padog.gesture(0, int(CG_X), int(yst))`
+—— **直接改 padog 的重心目标**（`PIT_goal`/`ROL_goal`/`X_goal`）。
+C 版把它变成了**显式输出** `gait_walk_gesture_t`，由调用方决定怎么用。
+
+而且原实现用 `int()` **向零截断**（不是四舍五入），所以那 3 个输出是整数、要求精确相等。
+参考值里有 457 行是负数 `grol`，专门覆盖这个截断行为。
+
+**又一个 Python 语义陷阱（和滑动平均那个同类）：**
+
+`_leg_xy()` 里的 `phi = local_t % T`，而 `local_t` 可能为负（`t - off2/off3/off4`）。
+Python 的 `%` 对负数返回**非负**结果（地板取模），C 的 `fmodf` 保留被除数符号 ——
+两者**差整整一个周期**，轨迹会完全错位。`gait_walk.c` 用 `py_fmodf()` 复刻。
+
+**还有一个"测试自身的漏洞"是我自己发现并补上的：**
+
+第一版参考值里我把腿系数写死成 `(1,1,1,1)` —— 这样**根本测不出**原实现形参
+`(r1, r4, r2, r3)` 那个错位映射对不对（映射错了也照样"通过"）。
+改成 4 组含非对称值的组合（含 `1,-2,-1,0.5` 这种）后，映射才真正被钉住。
+
 ### moving_avg ← PA_AVGFILT.py（**有状态**，测的是一串调用序列）
 
 ```
@@ -213,4 +248,6 @@ python check_mpy_loadable.py
 | `body_pose.c` | `PA_ATTITUDE.py` | ✅ 通过（696 项，最大 2.2e-5 mm） |
 | `gait_trot.c` | `PA_TROT.py` | ✅ 通过（8320 项，最大 1.9e-5 mm） |
 | `filter_moving_avg.c` | `PA_AVGFILT.py` | ✅ 通过（264 项，整数精确相等） |
-| `gait_walk.c` | `PA_WALK.py` | ⬜ 待做（stub 已就绪；注意它内部会调 `padog.gesture()` 改重心，移植时要变成显式输出） |
+| `gait_walk.c` | `PA_WALK.py` | ✅ 通过（7872 项足端 + 2952 项重心整数，最大 6.7e-5 mm） |
+
+**P1 的纯数学模块全部迁移完毕**（5/5）。剩下的是 NVS 配置（`config.py` / `config_s.py`）。

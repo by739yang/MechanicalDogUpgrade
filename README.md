@@ -23,6 +23,7 @@
 │       │   ├── kinematics       #   逆运动学        ← PA_IK.py
 │       │   ├── body_pose        #   机身姿态→足端   ← PA_ATTITUDE.py
 │       │   ├── gait_trot        #   TROT 步态       ← PA_TROT.py
+│       │   ├── gait_walk        #   WALK 步态(含重心副作用) ← PA_WALK.py
 │       │   └── filter_moving_avg#   滑动平均(有状态) ← PA_AVGFILT.py
 │       └── app/                # app_p0：P0 自检 + 串口控制台
 ├── tools/
@@ -66,7 +67,7 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **P0** | 工程、日志、I2C 扫描、PCA9685 单通道控制 | ✅ **完成**（2026-09-19 上机验收） |
-| P1 | 配置迁移 NVS + 逆运动学 + 姿态/步态纯数学 | 🟡 **进行中** — golden 测试台已跑通 4 套（合计 9872 项，最大误差 ≤ 6.0e-5，整数滤波器精确相等）；已迁移 `kinematics.c` / `body_pose.c` / `gait_trot.c` / `filter_moving_avg.c`；待做 `gait_walk.c` / NVS 配置 |
+| P1 | 配置迁移 NVS + 逆运动学 + 姿态/步态纯数学 | 🟡 **进行中** — **纯数学模块全部迁移完毕（5/5）**：golden 测试台跑通 5 套、合计 20 696 项，最大误差 ≤ 6.7e-5（整数项精确相等）；已迁移 `kinematics` / `body_pose` / `gait_trot` / `gait_walk` / `filter_moving_avg`；**待做 NVS 配置** |
 | P2 | 固定周期运动循环 + 12 路舵机输出 | ⬜ 未开始 |
 | P3 | TROT / WALK 步态与姿态数学 | ⬜ 未开始 |
 | P4 | IMU 与稳定控制 | ⛔ 本机无 IMU（决策 F1 = A：暂不加装，P4 再议） |
