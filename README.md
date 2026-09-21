@@ -19,7 +19,15 @@
 │       ├── main.c              # app_main：打印构建与芯片信息
 │       ├── bsp/                # bsp_i2c：I2C 总线、扫描、位操作扫描
 │       ├── drivers/            # drv_pca9685：双板 PCA9685 驱动
+│       ├── control/            # kinematics：逆运动学（从 PA_IK.py 迁移）
 │       └── app/                # app_p0：P0 自检 + 串口控制台
+├── tools/
+│   └── golden/                 # 宿主侧 golden 对照测试（不用烧板子）
+│       ├── README.md           # 用法与设计说明
+│       ├── gen_golden.py       # 从原始 MicroPython 模块生成参考值
+│       ├── golden/*.csv        # 参考向量表（已提交，C 测试只读它）
+│       ├── test_kinematics.c   # 宿主测试程序
+│       └── run_golden.bat      # 一键：生成 + 编译 + 比对
 ├── diagnostics/                # 上机诊断脚本（Python，跑在电脑上）
 │   ├── board_scan_i2c.py       # 扫描三条候选总线
 │   ├── board_scan_all_pins.py  # 全引脚双极性权威扫描
@@ -52,7 +60,7 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **P0** | 工程、日志、I2C 扫描、PCA9685 单通道控制 | ✅ **完成**（2026-09-19 上机验收） |
-| P1 | 配置迁移 NVS + 逆运动学 + 姿态/步态纯数学 | ⬜ 未开始 |
+| P1 | 配置迁移 NVS + 逆运动学 + 姿态/步态纯数学 | 🟡 **进行中** — golden 测试台已建；`kinematics.c` 已通过（592 项，最大误差 6e-5°） |
 | P2 | 固定周期运动循环 + 12 路舵机输出 | ⬜ 未开始 |
 | P3 | TROT / WALK 步态与姿态数学 | ⬜ 未开始 |
 | P4 | IMU 与稳定控制 | ⛔ 本机无 IMU（决策 F1 = A：暂不加装，P4 再议） |

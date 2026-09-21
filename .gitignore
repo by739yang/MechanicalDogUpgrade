@@ -28,6 +28,9 @@ build/
 # Diagnostic output regenerated on every run
 diagnostics/boot_log.txt
 
+# Host golden-test build output
+tools/golden/build/
+
 # Local backups and test artifacts
 _board_backup_*/
 _local_backup_*/
