@@ -139,12 +139,19 @@ esp_err_t drv_pca9685_set_pwm(uint8_t addr, uint8_t ch, uint16_t on, uint16_t of
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* 4096 表示「整周期全关」：OFF_H 的 bit4 置位 */
+    /*
+     * 4096 表示「整周期全关」：**LEDn_OFF_H 的 bit4**（FULL OFF 标志）置位。
+     *
+     * ⚠️ 高字节必须 & 0x1F，**不能 & 0x0F** —— bit4 正是那个全开/全关标志。
+     *    4096 >> 8 == 0x10，& 0x0F 会把它抹成 0，于是「无脉冲」变成了
+     *    ON=0/OFF=0。这是 P2 做 golden 对照时发现的真 bug（成长手册 P-21）。
+     *    0..4095 的正常占空比高字节最大是 0x0F，所以 & 0x1F 对它们没有影响。
+     */
     const uint8_t data[4] = {
         (uint8_t)(on & 0xFF),
-        (uint8_t)((on >> 8) & 0x0F),
+        (uint8_t)((on >> 8) & 0x1F),
         (uint8_t)(off & 0xFF),
-        (uint8_t)((off >> 8) & 0x0F),
+        (uint8_t)((off >> 8) & 0x1F),
     };
 
     return bsp_i2c_write_reg(addr, (uint8_t)(DRV_PCA9685_REG_LED0_ON_L + 4 * ch),
