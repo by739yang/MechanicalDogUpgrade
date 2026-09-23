@@ -12,6 +12,7 @@ capture_boot_log.py —— 硬复位板子并抓取完整串口启动日志
 import codecs
 import sys
 import time
+from pathlib import Path
 
 import serial
 
@@ -62,7 +63,10 @@ def main():
     print("\n\n================ 抓取结束 ================")
     print("共 %d 字节" % len(buf))
 
-    out = "boot_log.txt"
+    # 用**绝对路径**（脚本自己所在目录），不要依赖"当前工作目录"。
+    # 教训见成长手册 P-20：相对路径 + "我以为的当前目录"曾在仓库根目录
+    # 留下一个多余文件，还被提交了进去。
+    out = Path(__file__).resolve().parent / "boot_log.txt"
     with open(out, "w", encoding="utf-8") as f:
         f.write(text)
     print("已保存到 %s" % out)

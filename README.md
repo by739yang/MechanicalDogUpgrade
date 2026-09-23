@@ -11,25 +11,29 @@
 ├── ESP-IDF_C迁移表.md          # MicroPython 到 ESP-IDF C 的迁移计划与验收标准
 ├── 硬件实物核对清单.md         # 上电前的实物核对项（含 2026-09-19 实测记录）
 ├── 问题与解决记录.md           # 踩过的坑与解决方法（成长手册）
-├── firmware/                   # ESP-IDF C 工程 —— P0 已完成
+├── firmware/                   # ESP-IDF C 工程 —— P0 / P1 / P2 已完成
 │   ├── platformio.ini
 │   ├── sdkconfig.defaults
-│   ├── README.md               # 构建 / 烧录 / 串口控制台命令
+│   ├── README.md               # 构建 / 烧录 / 串口控制台命令 / P2 性能账
 │   └── src/
 │       ├── main.c              # app_main：打印构建与芯片信息
-│       ├── bsp/                # bsp_i2c：I2C 总线、扫描、位操作扫描
+│       ├── bsp/                # bsp_i2c：I2C 总线、扫描、位操作扫描、递归互斥锁
 │       ├── drivers/            # drv_pca9685：双板 PCA9685 驱动
-│       ├── control/            # 纯数学模块（从 PA_*.py 迁移）
+│       ├── control/            # 纯数学/映射模块（从 PA_*.py 迁移，可在电脑上测）
 │       │   ├── kinematics       #   逆运动学        ← PA_IK.py
 │       │   ├── body_pose        #   机身姿态→足端   ← PA_ATTITUDE.py
 │       │   ├── gait_trot        #   TROT 步态       ← PA_TROT.py
 │       │   ├── gait_walk        #   WALK 步态(含重心副作用) ← PA_WALK.py
-│       │   └── filter_moving_avg#   滑动平均(有状态) ← PA_AVGFILT.py
+│       │   ├── filter_moving_avg#   滑动平均(有状态) ← PA_AVGFILT.py
+│       │   └── servo_map        #   关节角→12 路舵机 ← PA_SERVO.py + padog.servo_output()
 │       └── app/                # 应用层
-│           ├── app_p0          #   P0 自检 + 串口控制台
+│           ├── app_p0          #   自检 + 串口控制台
 │           ├── app_config      #   配置结构体 + 校验 + CRC（纯 C，可宿主测试）
 │           ├── app_config_nvs  #   配置的 NVS 持久化后端
-│           └── app_cfg_cmd     #   cfg 控制台命令（含 66 个字段的偏移表）
+│           ├── app_cfg_cmd     #   cfg 控制台命令（含 66 个字段的偏移表）
+│           ├── servo_out       #   servo_map → PCA9685 粘合层 + 占空比缓存
+│           ├── motion          #   固定周期控制任务、限速、急停、超时停车
+│           └── app_motion_cmd  #   P2 命令（motion/stand/estop/lg/lgtest/readback）
 ├── tools/
 │   └── golden/                 # 宿主侧 golden 对照测试（不用烧板子）
 │       ├── README.md           # 用法与设计说明
@@ -44,6 +48,7 @@
 │   ├── board_scan_all_pins.py  # 全引脚双极性权威扫描
 │   ├── board_find_i2c.py       # 早期版本，保留为 readfrom_mem 假阳性的反面教材
 │   ├── capture_boot_log.py     # 硬复位并抓完整启动日志 + 自动判定关键项
+│   ├── monitor_serial.py       # 只监听不复位（长跑测试用，可检测中途重启）
 │   ├── send_cmd.py             # 向串口控制台发命令并抓回显
 │   └── hard_reset.py           # 用 DTR/RTS 硬复位（mpremote 进不去时用）
 ├── micropython/                # 原始机器狗 MicroPython 运行代码（行为参考）
@@ -72,14 +77,16 @@
 |---|---|---|
 | **P0** | 工程、日志、I2C 扫描、PCA9685 单通道控制 | ✅ **完成**（2026-09-19 上机验收） |
 | **P1** | 配置迁移 NVS + 逆运动学 + 姿态/步态纯数学 | ✅ **完成**（2026-09-19）—— 5 个纯数学模块 golden 对照全过（20 696 项，最大误差 ≤ 6.7e-5，整数项精确相等）；配置模块 68 条行为检查全过，NVS 持久化在真机验证（改值 → 保存 → 硬复位 → 值还在） |
-| P2 | 固定周期运动循环 + 12 路舵机输出 | ⬜ 未开始 |
-| P3 | TROT / WALK 步态与姿态数学 | ⬜ 未开始 |
+| **P2** | 固定周期运动循环 + 12 路舵机输出 | ✅ **完成**（2026-09-19 上机验收）—— 映射层 1004 项**逐位相同**；稳态周期 9999/10000 µs、超期 0 次；急停 31 ms；超时停车有效；上电不驱动舵机；**真机回读的 12 个占空比与 golden 12/12 相同**。⚠️ 以上全是**电信号/固件时序**验证；机械侧（舵机真转不转、通道→关节、压载站立）需插电池后做 |
+| P3 | TROT / WALK 步态与姿态数学 | ⬜ 未开始（`gait_trot` / `gait_walk` / `body_pose` 已在 P1 迁移并验证，待接进控制链） |
 | P4 | IMU 与稳定控制 | ⛔ 本机无 IMU（决策 F1 = A：暂不加装，P4 再议） |
 | P5 | Web 通信重构 | ⬜ 未开始 |
 | P6 | 机械臂、遥测、电源保护 | ⬜ 未开始 |
 
-> 注意：C 版目前**只完成了底层**。烧录 C 固件后，狗**不会走路、没有网页、机械臂不可用** ——
-> 这些都在 P1~P6。MicroPython 版仍保留为行为对照基准。
+> 注意：C 版目前完成了 **P0~P2（底层 + 配置 + 数学 + 固定周期舵机输出）**。
+> 烧录 C 固件后，狗**还不会走路、没有网页、机械臂不可用** —— 这些在 P3~P6。
+> 但已经可以：连串口 → `stand` → `motion start`，让狗**站起来并保持**。
+> MicroPython 版仍保留为行为对照基准。
 
 ## 安全说明
 

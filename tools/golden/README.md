@@ -174,6 +174,62 @@ RESULT: PASS -- all 264 outputs match exactly
 对负数**向 -∞ 取整**；而 C 的 `/` 是**向 0 截断**。陀螺仪原始值有负数，所以这是真实差异。
 `filter_moving_avg.c` 显式实现了向下取整。
 
+### servo_map ← PA_SERVO.py + padog.py 的 `servo_output()`（**P2 的映射层**）
+
+```
+[A] angle / duty path   (Servos.position + PCA9685.duty)
+rows        : 284   (angle: 240, duty: 44)
+exact rows  : 284 / 284
+min/max duty: 102 / 511
+mismatches  : 0
+
+[B] joint angles -> 12 channels   (padog.servo_output)
+rows        : 60   (ik path: 44, direct-stand path: 16)
+values      : 720  (12 channels x 2 registers)
+exact values: 720 / 720
+mismatches  : 0
+
+RESULT: PASS -- all angle/duty/PWM values match the MicroPython reference
+```
+
+这是**精确相等**的测试（0 个计数单位的容差），而且参考值的取法和前面都不同 ——
+它是"原代码真正会写进 PCA9685 的字节"：
+
+| 段 | 参考值怎么来的 |
+|---|---|
+| 角度 → 占空比 → (ON, OFF) | **直接 import 真的 `PA_SERVO.py`**，给它一个**记录型 I2C**。这个假 I2C 不模拟任何硬件行为，只把原代码要写的寄存器原样记下来 |
+| 关节角 → 12 路舵机角 | 用 `ast` 把 `padog.py` 里的 `servo_output()` 及依赖的 `_clamp_deg` / `_leg_cfg` / `_shank_ik_bias` / `cal_test_shank` / `_crawl_shank_servodelta` **原样抠出来** `exec`，不是手抄公式 |
+
+> `_hip_leg_deltas()`（髋辅助偏航）依赖摇杆与步态相位，属于 P3，所以这里替换成
+> 一个常量提供者；它输出的 4 个增量作为**输入**进 CSV，C 侧也是入参。
+
+**采样刻意覆盖的边界**：角度 0/180/越界（±1000）、分数角、真机中位角；
+占空比的 0 与 4095 两个特殊分支；四条腿**互不相等的**腿系数（否则映射错位测不出来，
+见 P-18）；爬行压低增量、小腿微调、三组不同几何（改变 `shank_ik_bias`）、
+以及"中位角被改过"的输入（证明 C 版真的用了配置里的中位值）。
+
+### ⚠️ 这个测试立刻抓出了一个真 bug（P-21）
+
+参考值里 `duty=0` 那一行是 `pwm(index, 0, 4096)` —— **4096**。
+而 C 驱动把高字节写成 `(off >> 8) & 0x0F`，把 **bit4（FULL OFF 标志）抹掉了**，
+于是"12 路无脉冲"实际上写的是 `ON=0/OFF=0`。正确掩码是 `& 0x1F`。
+
+这个 bug 从 P0 就在，只插 USB 不接舵机永远看不出来（没有负载可观察），
+**是逐位对照逼出来的**。修完真机 `readback` 能看到 `OFF=4096`。
+
+### ✅ 验证验证器：这个测试真的有牙齿吗
+
+把 `servo_map.c` 里腿2大腿那一行的 `+ ham2` 改成 `- ham2`，重跑：
+
+```
+FIRST MISMATCH: servo_output row=0 expected=(0,308) got=(0,102)
+mismatches  : 44        (44 = IK 行数，全都中招)
+RESULT: FAIL
+```
+
+一个正负号就全线 FAIL。对照那条"删掉代码结果一点没变"的 P-19，
+这就是**测试有牙齿**和**测试没牙齿**的区别。
+
 ### app_config ← config.py / config_s.py（**不是数值对照，是行为对照**）
 
 ```
@@ -241,9 +297,11 @@ RESULT: FAIL -- 101 of 264 outputs differ
 > **应该立刻 FAIL。** 如果改坏了它还 PASS，那才是真问题。
 
 **结论**：五个数学模块都与 MicroPython 参考**数值等价**（整数滤波器为精确相等），
-配置模块的 68 条行为检查全部通过。
+配置模块的 68 条行为检查全部通过，舵机映射层 1004 项**精确相等**。
 残余误差量级 8e-6 ~ 6e-5，纯粹是 C `float` 与 Python `double` 的舍入差
 （固件刻意用 `float`：ESP32 只有单精度硬件 FPU，`double` 是软件模拟，慢一两个数量级）。
+舵机映射层之所以能做到**零误差**，是因为它的输入在两侧都是"已经算好的数"，
+不经过浮点积分链。
 
 ---
 
@@ -279,10 +337,13 @@ python check_mpy_loadable.py
 
 ## 已知可改进项
 
-现在有 6 个 `test_*.c`，比对/报告逻辑高度重复（CSV 组各约 120 行）。
+现在有 7 个 `test_*.c`，比对/报告逻辑高度重复（CSV 组各约 120 行）。
 计划抽一个 `golden_util.h` 共享头（CSV 读取 + 最大误差统计 + PASS/FAIL 打印）。
 `test_app_config.c` 是断言式的，只会共用报告部分。
 暂时保持每个测试文件自包含、便于单读。
+
+`test_servo_map.c` 里的 `servo_output.csv` 有 60 列 —— 宽表读起来不直观。
+如果再加输入维度，应该改成 self-describing 的表头（`ik,hip1,...`）而不是继续加列。
 
 ---
 
@@ -303,8 +364,10 @@ python check_mpy_loadable.py
 | `filter_moving_avg.c` | `PA_AVGFILT.py` | ✅ 通过（264 项，整数精确相等） |
 | `gait_walk.c` | `PA_WALK.py` | ✅ 通过（7872 项足端 + 2952 项重心整数，最大 6.7e-5 mm） |
 | `app_config.c` | `config.py` / `config_s.py` | ✅ 通过（68 条行为检查；NVS 持久化在真机验证） |
+| `servo_map.c` | `PA_SERVO.py` + `padog.servo_output()` | ✅ 通过（284 + 720 = **1004 项精确相等**） |
 
-**P1 全部完成**：5 个纯数学模块 + 配置模块均已迁移并验证。
-配置的 NVS 持久化已在真机上用"改值 → 保存 → 硬复位 → 值还在"验证过。
+**P2 的映射层已迁移并验证**。舵机的**物理**通道→关节映射与转向
+（"ch7 到底是不是右前大腿、正转是抬起还是压下"）只能上机实测，
+见 `../../硬件实物核对清单.md` 阶段 E 与固件的 `lgtest` 命令。
 
-下一步是 **P2：控制层与舵机输出**（`PA_SERVO` / `padog` 主循环 / 动作序列）。
+下一步是 **P3：TROT / WALK 步态接进控制链**。
