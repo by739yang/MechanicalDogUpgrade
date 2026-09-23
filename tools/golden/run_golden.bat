@@ -56,6 +56,15 @@ gcc -O2 -Wall -Wextra -std=c11 ^
     test_gait_walk.c "..\..\firmware\src\control\gait_walk.c" -lm
 if errorlevel 1 goto :err
 
+rem app_config has no golden CSV: it is a check-based test that injects a RAM
+rem storage backend, so defaults / clamping / CRC / version / round trip are all
+rem verified on the PC without a board.
+gcc -O2 -Wall -Wextra -std=c11 ^
+    -I"..\..\firmware\src" ^
+    -o build\test_app_config.exe ^
+    test_app_config.c "..\..\firmware\src\app\app_config.c"
+if errorlevel 1 goto :err
+
 echo.
 echo [4/4] run
 build\test_kinematics.exe golden\ik.csv
@@ -71,6 +80,9 @@ build\test_gait_walk.exe golden\gait_walk.csv
 if errorlevel 1 set FAILED=1
 echo.
 build\test_moving_avg.exe golden\moving_avg.csv
+if errorlevel 1 set FAILED=1
+echo.
+build\test_app_config.exe
 if errorlevel 1 set FAILED=1
 
 echo.

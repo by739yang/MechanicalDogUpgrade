@@ -10,6 +10,7 @@
  */
 
 #include "app/app_p0.h"
+#include "app/app_cfg_cmd.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -173,8 +174,23 @@ static bool probe_verbose(uint8_t addr, const char *what)
 
 static void selftest(void)
 {
+    /* 配置最先加载：后面的行为都依赖它（中位角、步态参数、限幅）。
+       注意 P0 阶段只**读**配置、打印出来，还不用它驱动舵机。 */
     log_separator();
-    ESP_LOGI(TAG, "步骤 1/5：I2C 总线恢复（9 个 SCL 脉冲，防止从设备卡住 SDA）");
+    ESP_LOGI(TAG, "步骤 1/6：加载配置（NVS）");
+    app_cfg_cmd_init();
+    {
+        const app_config_t *c = app_cfg_cmd_get();
+        ESP_LOGI(TAG, "  AP 热点: ssid=\"%s\"  密码长度 %u",
+                 c->ap_ssid, (unsigned)strlen(c->ap_password));
+        ESP_LOGI(TAG, "  中位角 腿1(左前) 髋/大/小 = %.1f / %.1f / %.1f",
+                 (double)c->servo_center[0][0], (double)c->servo_center[0][1],
+                 (double)c->servo_center[0][2]);
+        ESP_LOGI(TAG, "  提示：敲 `cfg` 看全部，`cfg info` 看状态，`cfg list` 看字段名");
+    }
+
+    log_separator();
+    ESP_LOGI(TAG, "步骤 2/6：I2C 总线恢复（9 个 SCL 脉冲，防止从设备卡住 SDA）");
     bsp_i2c_bus_recover();
 
     /* 全总线扫描放在驱动安装之前，用位操作做。
@@ -182,11 +198,11 @@ static void selftest(void)
        探测不存在的地址每次要 1 秒（112 个地址 = 112 秒）。位操作只要 ~20 ms。
        这一步同时给出"总线上到底有什么"的完整清单 —— 包括有没有 IMU。 */
     log_separator();
-    ESP_LOGI(TAG, "步骤 2/5：位操作全总线扫描（不依赖驱动，约 20 ms）");
+    ESP_LOGI(TAG, "步骤 3/6：位操作全总线扫描（不依赖驱动，约 20 ms）");
     const size_t n_found = do_scan();
 
     log_separator();
-    ESP_LOGI(TAG, "步骤 3/5：初始化 I2C 驱动");
+    ESP_LOGI(TAG, "步骤 4/6：初始化 I2C 驱动");
     if (bsp_i2c_init() != ESP_OK) {
         ESP_LOGE(TAG, "I2C 初始化失败，P0 自检中止");
         return;
@@ -195,7 +211,7 @@ static void selftest(void)
     /* 用驱动路径再确认三个关键地址：证明后续读写能正常工作。
        只探这 3 个（都存在），所以这一步是"零成本"的。 */
     log_separator();
-    ESP_LOGI(TAG, "步骤 4/5：驱动路径定向探测（只探存在的 3 个地址，零等待）");
+    ESP_LOGI(TAG, "步骤 5/6：驱动路径定向探测（只探存在的 3 个地址，零等待）");
     const bool ok40 = probe_verbose(DRV_PCA9685_ADDR_LEFT, "PCA9685 左半身");
     const bool ok41 = probe_verbose(DRV_PCA9685_ADDR_RIGHT, "PCA9685 右半身");
     probe_verbose(DRV_PCA9685_ADDR_ALLCALL, "PCA9685 all-call 广播");
@@ -211,7 +227,7 @@ static void selftest(void)
     ESP_LOGI(TAG, "两片 PCA9685 都在线 ✔（位操作扫描共发现 %u 个器件）", (unsigned)n_found);
 
     log_separator();
-    ESP_LOGI(TAG, "步骤 5/5：初始化两片 PCA9685（置安全态）+ 回读校验");
+    ESP_LOGI(TAG, "步骤 6/6：初始化两片 PCA9685（置安全态）+ 回读校验");
     for (size_t i = 0; i < P0_BOARD_COUNT; ++i) {
         esp_err_t err = drv_pca9685_init(s_boards[i], DRV_PCA9685_DEFAULT_HZ);
         if (err != ESP_OK) {
@@ -244,6 +260,15 @@ static void cmd_help(void)
     ESP_LOGI(TAG, "  sweep <board> <ch> <from> <to> <step> <delay_ms>   慢速往返扫动");
     ESP_LOGI(TAG, "  raw <board> <reg_hex>         读一个寄存器（调试用）");
     ESP_LOGI(TAG, "  deg <board> <ch> <0..180>     按 MicroPython 的换算输出对应脉宽");
+    ESP_LOGI(TAG, "  ---- 配置（NVS 持久化）----");
+    ESP_LOGI(TAG, "  cfg                           打印当前全部配置");
+    ESP_LOGI(TAG, "  cfg info                      版本 / CRC / 结构大小 / NVS 用量");
+    ESP_LOGI(TAG, "  cfg list                      列出所有可设的字段名");
+    ESP_LOGI(TAG, "  cfg get <name>                读单项");
+    ESP_LOGI(TAG, "  cfg set <name> <value>        改单项（立即校验限幅）");
+    ESP_LOGI(TAG, "  cfg save                      写入 NVS（掉电重启仍生效）");
+    ESP_LOGI(TAG, "  cfg load                      从 NVS 重新读取");
+    ESP_LOGI(TAG, "  cfg reset                     恢复出厂默认并擦除 NVS");
 }
 
 static void cmd_status(void)
@@ -468,6 +493,20 @@ static void handle_line(char *line)
         cmd_sweep(args);
     } else if (strcmp(cmd, "raw") == 0) {
         cmd_raw(args);
+    } else if (strcmp(cmd, "cfg") == 0) {
+        /* 把剩余部分拆成 "子命令 参数" */
+        char sub[32];
+        size_t i = 0;
+        while (args[i] != '\0' && args[i] != ' ' && i < sizeof(sub) - 1) {
+            sub[i] = args[i];
+            ++i;
+        }
+        sub[i] = '\0';
+        const char *rest = args + i;
+        while (*rest == ' ') {
+            ++rest;
+        }
+        app_cfg_cmd_handle(sub, rest);
     } else {
         ESP_LOGW(TAG, "未知命令 '%s'，输入 help 查看用法", cmd);
     }
