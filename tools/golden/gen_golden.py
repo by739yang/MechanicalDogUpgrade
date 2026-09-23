@@ -13,6 +13,7 @@ gen_golden.py —— 从原始 MicroPython 模块生成 golden 参考向量表
 用法：
     python tools/golden/gen_golden.py
 """
+import ast
 import os
 import sys
 import math
@@ -407,6 +408,285 @@ def gen_gait_walk(ns, fh):
     return rows
 
 
+# ============================================================================
+#  P2: 舵机映射层 (servo_map.c)
+# ============================================================================
+#
+# 这一层有两段原代码要对照，取法各不相同：
+#
+# 1. 角度 -> 占空比 -> (ON, OFF)：**直接 import 真的 PA_SERVO.py**。
+#    它的顶层会 new I2C 并 new 两片 Servos，所以用 mpy_stubs 里那个
+#    "记录型" I2C —— 它不模拟硬件，只是把原代码要写的寄存器记下来。
+#    于是参考值 = 原代码真正会写进 PCA9685 的字节。
+#
+# 2. 关节角 -> 12 路舵机角：把 `padog.py` 里的 `servo_output()` 及其依赖的
+#    几个函数**用 ast 原样抠出来** exec，而不是手抄公式。
+#    `_hip_leg_deltas()` 依赖摇杆/相位（属于 P3），这里替换成一个常量提供者；
+#    `_crawl_shank_servodelta()` / `cal_test_shank()` / `_clamp_deg()` /
+#    `_leg_cfg()` / `_shank_ik_bias()` 都用**原件**。
+
+PADOG_SRC = (MPY / "padog.py")
+
+#: 要抠出来的函数（全部来自 padog.py，不重写）
+_PADOG_FUNCS = (
+    "_clamp_deg",
+    "_leg_cfg",
+    "_shank_ik_bias",
+    "cal_test_shank",
+    "_crawl_active",
+    "_crawl_shank_servodelta",
+    "servo_output",
+)
+
+#: 真机的中位角（config_s.py 实测值），列序 = 腿1..腿4 × 髋/大腿/小腿
+REAL_INIT = [
+    102.0, 84.0, 92.0,   # 腿1 左前
+    96.0, 91.0, 85.0,    # 腿2 右前
+    108.0, 78.0, 68.0,   # 腿3 右后
+    92.0, 98.0, 102.0,   # 腿4 左后
+]
+
+
+def extract_padog_funcs(names):
+    """用 ast 从 padog.py 抠出指定顶层函数的**原始源码**并 exec。"""
+    src = PADOG_SRC.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    found = {}
+    segs = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in names:
+            segs.append(ast.get_source_segment(src, node))
+            found[node.name] = True
+    missing = [n for n in names if n not in found]
+    if missing:
+        raise SystemExit("padog.py 里找不到这些函数（改名了？）: %s" % missing)
+
+    ns = {"__name__": "padog_extracted"}
+    exec(compile("\n\n".join(segs), "padog.py[extracted]", "exec"), ns)
+    return ns
+
+
+def load_servo_module():
+    """加载真的 PA_SERVO.py（用记录型 I2C），并屏蔽它顶层的 scan 打印。"""
+    mpy_stubs.install_for_servo()
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ns = load_module("PA_SERVO.py")
+    return ns, ns["_i2c_servo"]
+
+
+class _AttrNS:
+    """让 dict 支持属性访问，好把 exec 出来的命名空间当成 PA_SERVO 模块用。"""
+
+    def __init__(self, d):
+        self.__dict__.update(d)
+
+
+def gen_servo_angle(fh, ch_samples, duty_samples):
+    """
+    角度 -> (addr, pca_ch, on, off)
+
+    CSV 列：kind,ch,val,addr,pca_ch,on,off
+      kind=0 表示 angle(ch, val)      —— val 是角度
+      kind=1 表示 该通道所在板的 pca9685.duty(pca_ch, val) —— val 是占空比
+    """
+    ns, rec = load_servo_module()
+
+    rows = 0
+
+    def one(kind, ch, val, fn):
+        nonlocal rows
+        rec.clear()
+        fn()
+        writes = rec.led_writes()
+        if len(writes) != 1:
+            raise SystemExit("期望 1 次 LED 写，实际 %d 次：ch=%s val=%s" % (len(writes), ch, val))
+        addr, pca_ch, on, off = writes[0]
+        fh.write("%d,%d,%.4f,%d,%d,%d,%d\n" % (kind, ch, val, addr, pca_ch, on, off))
+        rows += 1
+
+    for ch, deg in ch_samples:
+        one(0, ch, deg, lambda ch=ch, deg=deg: ns["angle"](ch, deg))
+
+    # 占空比的三个特殊分支：0（无脉冲）、4095（全开）、以及中间值
+    for ch, duty in duty_samples:
+        addr = 0x40 if ch < 6 else 0x41
+        pca_ch = ch if ch < 6 else ch - 6
+        dev = ns["servos40"] if ch < 6 else ns["servos41"]
+        one(1, ch, float(duty),
+            lambda dev=dev, pca_ch=pca_ch, duty=duty: dev.pca9685.duty(pca_ch, duty))
+
+    print("  servo_angle golden 行数: %d" % rows)
+    return rows
+
+
+def gen_servo_output(fh, cases):
+    """
+    关节角 -> 12 路舵机输出
+
+    CSV 列（逗号分隔）：
+      ik, h1..h4, ham1..ham4, sh1..sh4, cs1..cs4, init×12, trim×4, l1, l2, ref,
+      然后 12 组 (on,off) —— 顺序为**逻辑通道 0..11**
+    """
+    ns_servo, rec = load_servo_module()
+
+    ns = extract_padog_funcs(_PADOG_FUNCS)
+    # servo_output 用 `PA_SERVO.angle(...)`，所以这里要一个支持属性访问的对象，
+    # 而不是 dict —— 直接给它**真的** PA_SERVO 命名空间。
+    ns["PA_SERVO"] = _AttrNS(ns_servo)
+    ns["CRAWL_SHANK_FRONT"] = 20.0
+    ns["CRAWL_SHANK_REAR"] = 30.0
+    ns["crawl_phase"] = 0
+
+    hips = [0.0, 0.0, 0.0, 0.0]
+
+    def hip_provider():
+        return tuple(hips)
+
+    ns["_hip_leg_deltas"] = hip_provider
+    servo_output = ns["servo_output"]
+
+    # 逻辑通道 -> (addr, pca_ch)，与 C 版 servo_map.c 的表一致
+    LOGICAL = [(0x40, 0), (0x40, 1), (0x40, 2), (0x40, 3), (0x40, 4), (0x40, 5),
+               (0x41, 0), (0x41, 1), (0x41, 2), (0x41, 3), (0x41, 4), (0x41, 5)]
+
+    rows = 0
+    for c in cases:
+        ns["l1"] = c["l1"]
+        ns["l2"] = c["l2"]
+        ns["leg_len_ref"] = c["ref"]
+        ns["crawl_phase"] = c["crawl"]
+        hips[:] = c["hip"]
+        # 中位角在 padog.py 里是**模块级全局**（来自 config_s.py），不是形参 ——
+        # 所以每次调用前把它们塞进命名空间，顺便证明 C 版真的用了配置里的中位角。
+        _joints = ("p", "h", "s")   # 髋 / 大腿 / 小腿
+        for i, val in enumerate(c["init"]):
+            leg_n = i // 3 + 1
+            ns["init_%d%s" % (leg_n, _joints[i % 3])] = val
+        for i in range(4):
+            # _leg_cfg("s_trim", n) 查的是 globals()["leg{n}_s_trim"]
+            ns.pop("leg%d_s_trim" % (i + 1), None)
+            if c["trim"][i] != 0.0:
+                ns["leg%d_s_trim" % (i + 1)] = c["trim"][i]
+
+        rec.clear()
+        # cs 由原实现自己算（`_crawl_shank_servodelta`），**不要**在这里手填 ——
+        # CSV 里的 cs 必须与参考值真正用到的一致，否则测的是一个不存在的组合。
+        cs_ref = [ns["_crawl_shank_servodelta"](n) for n in (1, 2, 3, 4)]
+
+        # 原实现形参顺序：case, init, ham1..ham4, shank1..shank4
+        servo_output(int(c["mode_case"]), int(c["mode_init"]),
+                     c["ham"][0], c["ham"][1], c["ham"][2], c["ham"][3],
+                     c["shank"][0], c["shank"][1], c["shank"][2], c["shank"][3])
+
+        got = {(a, ch): (on, off) for (a, ch, on, off) in rec.led_writes()}
+        if len(got) != 12:
+            raise SystemExit("期望 12 个通道，实际 %d 个：%s" % (len(got), sorted(got)))
+
+        fields = [1 if (int(c["mode_case"]) == 0 and int(c["mode_init"]) == 0) else 0]
+        fields += c["hip"]
+        fields += c["ham"]
+        fields += c["shank"]
+        fields += cs_ref
+        fields += c["init"]
+        fields += c["trim"]
+        fields += [c["l1"], c["l2"], c["ref"]]
+        for key in LOGICAL:
+            on, off = got[key]
+            fields += [on, off]
+
+        fh.write(",".join(
+            ("%d" % f) if isinstance(f, int) else ("%.6f" % f) for f in fields
+        ) + "\n")
+        rows += 1
+
+    print("  servo_output golden 行数: %d" % rows)
+    return rows
+
+
+def servo_angle_samples():
+    """(ch, deg) 与 (ch, duty) 采样：覆盖限幅、分数、负值、边界。"""
+    degs = [
+        0.0, 1.0, 45.5, 90.0, 90.25, 120.0, 179.0, 180.0,
+        181.0, 200.0, 1000.0,          # 越上界 -> 应被限幅
+        -1.0, -90.0, -1000.0,          # 越下界 -> 应被限幅
+        84.0, 92.0, 102.0, 68.0,       # 真机中位角
+        37.123456, 143.987654,
+    ]
+    chs = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    ang = [(ch, d) for d in degs for ch in chs]
+    duties = [(ch, d) for d in (0, 1, 101, 102, 103, 255, 511, 512, 2048, 4094, 4095)
+              for ch in (0, 5, 6, 11)]
+    return ang, duties
+
+
+def servo_output_cases(n_random=60, seed=20260919):
+    """生成 servo_output 的输入组合：站姿附近 + 大范围 + 非 IK 路径。"""
+    cases = []
+    rnd = random.Random(seed)
+
+    def mk(ik, ham, shank, cs=None, hip=None, trim=None, crawl=0,
+           l1=130.0, l2=138.0, ref=149.0, init=None):
+        # 注意："mode_*" 是 servo_output 的形参 case/init；"init" 是 12 个中位角。
+        # 两者同名会互相覆盖，所以显式分开命名。
+        # 这里**不接受** cs：crawl 压低增量必须由参考实现自己算出来再写进 CSV，
+        # 否则 CSV 里写的和参考值实际用到的会是两个数（这个坑我踩过一次）。
+        return {
+            "mode_case": 0 if ik else 1,
+            "mode_init": 0 if ik else 1,
+            "hip": list(hip) if hip else [0.0, 0.0, 0.0, 0.0],
+            "ham": list(ham),
+            "shank": list(shank),
+            "init": list(init) if init else list(REAL_INIT),
+            "trim": list(trim) if trim else [0.0, 0.0, 0.0, 0.0],
+            "l1": l1, "l2": l2, "ref": ref, "crawl": crawl,
+        }
+
+    # 1) 站姿：ham≈90、shank≈40（由中位角反推，见 servo_map.h 注释）
+    cases.append(mk(True, [90.0] * 4, [40.0] * 4))
+    cases.append(mk(False, [0.0] * 4, [0.0] * 4))
+    # 2) 髋辅助偏航（原 _hip_leg_deltas 的输出），含正负与限幅值
+    for hip in ([5.0, -5.0, 5.0, -5.0], [18.0, -18.0, 18.0, -18.0], [-20.0, 20.0, -20.0, 20.0]):
+        cases.append(mk(True, [90.0] * 4, [40.0] * 4, hip=hip))
+        cases.append(mk(False, [0.0] * 4, [0.0] * 4, hip=hip))
+    # 3) 爬行压低增量（由原 _crawl_shank_servodelta 算出：腿1=-20 腿2=+20 腿3=+30 腿4=-30）
+    cases.append(mk(True, [90.0] * 4, [40.0] * 4, crawl=1))
+    cases.append(mk(True, [70.0] * 4, [55.0] * 4, crawl=1))
+    # 4) 小腿微调非零（原 _leg_cfg("s_trim", n)）
+    cases.append(mk(True, [90.0] * 4, [40.0] * 4, trim=[2.0, -3.0, 5.0, 0.5]))
+    cases.append(mk(True, [110.0] * 4, [20.0] * 4, trim=[-5.0, 5.0, 0.0, 10.0]))
+    # 5) 几何不同 -> shank_ik_bias 不同（含 extra<0 的 0 偏置分支）
+    for (l1, l2, ref) in ((130.0, 138.0, 149.0), (120.0, 120.0, 149.0), (100.0, 100.0, 149.0)):
+        cases.append(mk(True, [90.0] * 4, [40.0] * 4, l1=l1, l2=l2, ref=ref))
+    # 6) 四腿各不相同（否则映射错位也测不出来 —— 见成长手册 P-18）
+    cases.append(mk(True, [60.0, 90.0, 120.0, 45.0], [10.0, 40.0, 70.0, 100.0]))
+    cases.append(mk(True, [130.0, 30.0, 95.0, 150.0], [5.0, 95.0, 35.0, 60.0]))
+    # 7) 大范围 / 越界（走占空比限幅）
+    cases.append(mk(True, [-40.0, 200.0, 0.0, 400.0], [-50.0, 0.0, 150.0, 300.0]))
+    # 8) 中位角被改（证明 C 版确实用了配置里的中位角）
+    alt_init = list(REAL_INIT)
+    for i in range(12):
+        alt_init[i] += (i % 5) * 3.0 - 6.0
+    cases.append(mk(True, [90.0] * 4, [40.0] * 4, init=alt_init))
+    cases.append(mk(False, [0.0] * 4, [0.0] * 4, init=alt_init))
+    # 9) 随机（固定种子，可复现）
+    while len(cases) < n_random:
+        cases.append(mk(
+            rnd.random() < 0.75,
+            [rnd.uniform(20.0, 150.0) for _ in range(4)],
+            [rnd.uniform(-20.0, 120.0) for _ in range(4)],
+            hip=[rnd.uniform(-18.0, 18.0) for _ in range(4)],
+            trim=[rnd.uniform(-8.0, 8.0) for _ in range(4)],
+            crawl=rnd.randint(0, 1),
+            l1=rnd.choice([130.0, 125.0, 140.0]),
+            l2=rnd.choice([138.0, 130.0, 145.0]),
+            ref=rnd.choice([149.0, 145.0, 160.0]),
+        ))
+    return cases
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -423,32 +703,43 @@ def main():
 
     total = 0
 
-    print("\n[1/5] PA_IK -> kinematics.c ...")
+    print("\n[1/7] PA_IK -> kinematics.c ...")
     ns_ik = load_module("PA_IK.py")
     with open(OUT / "ik.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_ik(ns_ik, fh)
 
-    print("\n[2/5] PA_ATTITUDE -> body_pose.c ...")
+    print("\n[2/7] PA_ATTITUDE -> body_pose.c ...")
     ns_att = load_module("PA_ATTITUDE.py")
     with open(OUT / "body_pose.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_body_pose(ns_att, fh)
 
-    print("\n[3/5] PA_TROT -> gait_trot.c ...")
+    print("\n[3/7] PA_TROT -> gait_trot.c ...")
     ns_trot = load_module("PA_TROT.py")
     with open(OUT / "gait_trot.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_gait_trot(ns_trot, fh)
 
-    print("\n[4/5] PA_AVGFILT -> filter_moving_avg.c ...")
+    print("\n[4/7] PA_AVGFILT -> filter_moving_avg.c ...")
     ns_flt = load_module("PA_AVGFILT.py")
     with open(OUT / "moving_avg.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_moving_avg(ns_flt, fh)
 
-    print("\n[5/5] PA_WALK -> gait_walk.c ...")
+    print("\n[5/7] PA_WALK -> gait_walk.c ...")
     ns_walk = load_module("PA_WALK.py")
     with open(OUT / "gait_walk.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_gait_walk(ns_walk, fh)
 
-    print("\n完成。共 5 个 suite, %d 行。" % total)
+    # 最后两个 suite 会把 machine.I2C / machine.Pin 换成"记录型"实现，
+    # 所以放在最后，避免影响前面依赖 stub 会抛异常的模块。
+    print("\n[6/7] PA_SERVO -> servo_map.c（角度/占空比路径）...")
+    ang, duties = servo_angle_samples()
+    with open(OUT / "servo_angle.csv", "w", encoding="utf-8", newline="\n") as fh:
+        total += gen_servo_angle(fh, ang, duties)
+
+    print("\n[7/7] padog.servo_output -> servo_map.c（关节角 -> 12 路）...")
+    with open(OUT / "servo_output.csv", "w", encoding="utf-8", newline="\n") as fh:
+        total += gen_servo_output(fh, servo_output_cases())
+
+    print("\n完成。共 7 个 suite, %d 行。" % total)
     print("提示：这些 CSV 要提交进仓库，C 版测试只读它们。")
 
 
