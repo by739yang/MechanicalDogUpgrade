@@ -142,6 +142,27 @@ esp_err_t bsp_i2c_bitbang_begin(void);
  */
 size_t bsp_i2c_scan_bitbang(uint8_t *found, size_t max_found);
 
+/**
+ * @brief 取得/释放总线互斥锁。
+ *
+ * 为什么需要：P2 起有**两个任务**会碰这条 I2C —— 运动任务（每 10 ms 写 12 路舵机）
+ * 和控制台任务（`lg` / `sweep` / `status` 等）。迁移表 §8.5 明确要求
+ * 「不让多个任务无锁访问同一个 I2C 总线」：一次 PCA9685 写要 4 个数据字节，
+ * 被另一个任务的传输插进来就会写坏寄存器。
+ *
+ * **`bsp_i2c_write_reg()` / `bsp_i2c_read_reg()` / `bsp_i2c_probe*()` 内部已经自动加锁**，
+ * 所以普通调用者不用管。需要**跨多次传输保持原子**时（例如"读-改-写"一整片
+ * PCA9685），才显式调用这两个函数。
+ *
+ * 锁是**递归锁**：已经持有时再取不会死锁。
+ *
+ * @return ESP_OK 成功；超时返回 ESP_ERR_TIMEOUT
+ */
+esp_err_t bsp_i2c_lock(uint32_t timeout_ms);
+
+/** @brief 释放总线互斥锁（与 bsp_i2c_lock 配对，必须在同一任务里调用） */
+void bsp_i2c_unlock(void);
+
 #ifdef __cplusplus
 }
 #endif

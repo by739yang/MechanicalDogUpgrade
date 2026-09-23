@@ -12,11 +12,36 @@
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "bsp_i2c";
 
 static bool s_installed = false;
+
+/** 总线互斥锁（递归）。见 bsp_i2c.h 的说明。 */
+static SemaphoreHandle_t s_lock = NULL;
+
+esp_err_t bsp_i2c_lock(uint32_t timeout_ms)
+{
+    if (s_lock == NULL) {
+        /* 驱动还没装：此时不会有并发，直接放行 */
+        return ESP_OK;
+    }
+    if (xSemaphoreTakeRecursive(s_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        ESP_LOGE(TAG, "取 I2C 互斥锁超时（%u ms）—— 可能有任务在长时间占用总线",
+                 (unsigned)timeout_ms);
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+void bsp_i2c_unlock(void)
+{
+    if (s_lock != NULL) {
+        xSemaphoreGiveRecursive(s_lock);
+    }
+}
 
 /**
  * @brief 总线恢复：从设备若把 SDA 拉低不放，用 9 个 SCL 脉冲把它顶出去。
@@ -109,8 +134,18 @@ esp_err_t bsp_i2c_init(void)
         return err;
     }
 
+    /* 总线互斥锁：P2 起运动任务与控制台任务会并发访问同一条 I2C */
+    if (s_lock == NULL) {
+        s_lock = xSemaphoreCreateRecursiveMutex();
+        if (s_lock == NULL) {
+            ESP_LOGE(TAG, "创建 I2C 互斥锁失败");
+            (void)i2c_driver_delete(BSP_I2C_PORT);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     s_installed = true;
-    ESP_LOGI(TAG, "I2C 就绪: port=%d SDA=GPIO%d SCL=GPIO%d %d Hz",
+    ESP_LOGI(TAG, "I2C 就绪: port=%d SDA=GPIO%d SCL=GPIO%d %d Hz（含递归互斥锁）",
              (int)BSP_I2C_PORT, BSP_I2C_SDA_GPIO, BSP_I2C_SCL_GPIO, BSP_I2C_CLK_HZ);
     return ESP_OK;
 }
@@ -147,8 +182,14 @@ esp_err_t bsp_i2c_write_reg(uint8_t dev, uint8_t reg, const uint8_t *data, size_
         memcpy(&buf[1], data, len);
     }
 
-    return i2c_master_write_to_device(BSP_I2C_PORT, dev, buf, len + 1,
-                                      pdMS_TO_TICKS(BSP_I2C_TIMEOUT_MS));
+    esp_err_t lock_err = bsp_i2c_lock(BSP_I2C_TIMEOUT_MS);
+    if (lock_err != ESP_OK) {
+        return lock_err;
+    }
+    const esp_err_t err = i2c_master_write_to_device(BSP_I2C_PORT, dev, buf, len + 1,
+                                                     pdMS_TO_TICKS(BSP_I2C_TIMEOUT_MS));
+    bsp_i2c_unlock();
+    return err;
 }
 
 esp_err_t bsp_i2c_read_reg(uint8_t dev, uint8_t reg, uint8_t *data, size_t len)
@@ -160,8 +201,14 @@ esp_err_t bsp_i2c_read_reg(uint8_t dev, uint8_t reg, uint8_t *data, size_t len)
         return ESP_ERR_INVALID_ARG;
     }
 
-    return i2c_master_write_read_device(BSP_I2C_PORT, dev, &reg, 1, data, len,
-                                        pdMS_TO_TICKS(BSP_I2C_TIMEOUT_MS));
+    esp_err_t lock_err = bsp_i2c_lock(BSP_I2C_TIMEOUT_MS);
+    if (lock_err != ESP_OK) {
+        return lock_err;
+    }
+    const esp_err_t err = i2c_master_write_read_device(BSP_I2C_PORT, dev, &reg, 1, data, len,
+                                                       pdMS_TO_TICKS(BSP_I2C_TIMEOUT_MS));
+    bsp_i2c_unlock();
+    return err;
 }
 
 esp_err_t bsp_i2c_probe_timed(uint8_t dev, int64_t *elapsed_us)
@@ -172,9 +219,14 @@ esp_err_t bsp_i2c_probe_timed(uint8_t dev, int64_t *elapsed_us)
 
     uint8_t dummy = 0;
     const int64_t t0 = esp_timer_get_time();
+    esp_err_t lock_err = bsp_i2c_lock(BSP_I2C_TIMEOUT_MS);
+    if (lock_err != ESP_OK) {
+        return lock_err;
+    }
     /* 只要能读到 1 个字节，就说明地址被 ACK 了 */
     esp_err_t err = i2c_master_read_from_device(BSP_I2C_PORT, dev, &dummy, 1,
                                                 pdMS_TO_TICKS(BSP_I2C_SCAN_TIMEOUT_MS));
+    bsp_i2c_unlock();
     if (elapsed_us != NULL) {
         *elapsed_us = esp_timer_get_time() - t0;
     }

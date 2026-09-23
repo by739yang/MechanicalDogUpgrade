@@ -1,0 +1,513 @@
+/**
+ * @file    motion.c
+ * @brief   P2：固定周期运动任务实现
+ */
+
+#include "app/motion.h"
+
+#include <math.h>
+#include <string.h>
+
+#include "app/app_cfg_cmd.h"
+#include "app/servo_out.h"
+#include "bsp/bsp_i2c.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
+static const char *TAG = "motion";
+
+/** 控制任务栈大小（字节）。里面只有浮点运算与日志，4 KB 足够。 */
+#define MOTION_TASK_STACK   4096
+/** 控制任务优先级：高于控制台（5），低于 WiFi/系统任务 */
+#define MOTION_TASK_PRIO    10
+/** 把控制任务钉在 core 1，减少与 WiFi/控制台的相互干扰 */
+#define MOTION_TASK_CORE    1
+
+typedef struct {
+    float target[SERVO_MAP_CHANNELS];
+    float current[SERVO_MAP_CHANNELS];
+    bool  target_valid;      /**< 是否已经有人给过目标 */
+} motion_state_t;
+
+static SemaphoreHandle_t s_mutex = NULL;      /**< 保护下面的状态 */
+static TaskHandle_t      s_task  = NULL;
+static volatile bool     s_run   = false;     /**< 任务是否应当继续 */
+static volatile bool     s_estop = false;     /**< 急停请求 */
+static volatile int64_t  s_last_cmd_us = 0;   /**< 上次命令时间（心跳） */
+
+static motion_state_t s_state;
+static uint32_t s_period_ms  = MOTION_DEFAULT_PERIOD_MS;
+static float    s_rate_dps   = MOTION_DEFAULT_RATE_DPS;
+static uint32_t s_timeout_ms = MOTION_DEFAULT_TIMEOUT_MS;
+
+/* 统计（任务写、控制台读，用 s_mutex 保护） */
+static motion_stats_t s_stats;
+
+static void stats_reset(void)
+{
+    memset(&s_stats, 0, sizeof(s_stats));
+    s_stats.period_min_us = INT64_MAX;
+    s_stats.period_ms     = (float)s_period_ms;
+    s_stats.rate_dps      = s_rate_dps;
+    s_stats.timeout_ms    = s_timeout_ms;
+}
+
+const char *motion_stop_reason_str(uint32_t reason)
+{
+    switch (reason) {
+    case MOTION_STOP_NONE:    return "无（还在运行）";
+    case MOTION_STOP_USER:    return "用户停止";
+    case MOTION_STOP_ESTOP:   return "急停";
+    case MOTION_STOP_TIMEOUT: return "命令超时";
+    case MOTION_STOP_ERROR:   return "内部错误";
+    default:                  return "?";
+    }
+}
+
+/* ==========================================================================
+ * 目标 / 当前角度
+ * ========================================================================== */
+
+static float clamp_angle(float a)
+{
+    if (a > 180.0f) {
+        return 180.0f;
+    }
+    if (a < 0.0f) {
+        return 0.0f;
+    }
+    return a;
+}
+
+esp_err_t motion_set_target(const float deg[SERVO_MAP_CHANNELS])
+{
+    if (deg == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    for (uint8_t ch = 0; ch < SERVO_MAP_CHANNELS; ++ch) {
+        s_state.target[ch] = clamp_angle(deg[ch]);
+    }
+    s_state.target_valid = true;
+    xSemaphoreGive(s_mutex);
+
+    motion_keepalive();
+    return ESP_OK;
+}
+
+esp_err_t motion_set_target_stand(void)
+{
+    const app_config_t *cfg = app_cfg_cmd_get();
+    if (cfg == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    servo_map_input_t in;
+    memset(&in, 0, sizeof(in));
+    in.ik_path = false;             /* -> servo_output 的 else 分支：直接站姿 */
+    in.shank_bias = servo_map_shank_bias(cfg->l1, cfg->l2, cfg->leg_len_ref);
+    for (int leg = 0; leg < SERVO_MAP_LEGS; ++leg) {
+        for (int j = 0; j < SERVO_MAP_JOINTS; ++j) {
+            in.init[leg][j] = cfg->servo_center[leg][j];
+        }
+    }
+
+    float deg[SERVO_MAP_CHANNELS];
+    servo_map_legs_to_angles(&in, deg);
+    return motion_set_target(deg);
+}
+
+void motion_get_stats(motion_stats_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    if (s_mutex == NULL) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    *out = s_stats;
+    out->running  = s_run;
+    out->estopped = s_estop;
+    memcpy(out->target, s_state.target, sizeof(out->target));
+    memcpy(out->current, s_state.current, sizeof(out->current));
+    xSemaphoreGive(s_mutex);
+}
+
+/* ==========================================================================
+ * 参数
+ * ========================================================================== */
+
+esp_err_t motion_set_period_ms(uint32_t ms)
+{
+    if (ms < 1 || ms > 1000) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_period_ms = ms;
+    if (s_mutex != NULL && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_stats.period_ms = (float)ms;
+        xSemaphoreGive(s_mutex);
+    }
+    return ESP_OK;
+}
+
+esp_err_t motion_set_rate_dps(float dps)
+{
+    if (dps < 1.0f || dps > 2000.0f) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_rate_dps = dps;
+    if (s_mutex != NULL && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_stats.rate_dps = dps;
+        xSemaphoreGive(s_mutex);
+    }
+    return ESP_OK;
+}
+
+esp_err_t motion_set_timeout_ms(uint32_t ms)
+{
+    if (ms > 3600000u) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_timeout_ms = ms;
+    if (s_mutex != NULL && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_stats.timeout_ms = ms;
+        xSemaphoreGive(s_mutex);
+    }
+    motion_keepalive();
+    return ESP_OK;
+}
+
+bool motion_is_running(void)
+{
+    return s_run;
+}
+
+void motion_keepalive(void)
+{
+    s_last_cmd_us = esp_timer_get_time();
+}
+
+void motion_estop(const char *why)
+{
+    ESP_LOGE(TAG, "*** 急停 *** %s", (why != NULL) ? why : "");
+
+    if (s_run) {
+        /* 任务在跑 -> 只置标志，由任务在下一个周期内松力并退出（单写者不变式） */
+        s_estop = true;
+        return;
+    }
+
+    /* 任务没在跑 -> 当前任务可以直接写 */
+    const esp_err_t err = servo_out_all_off();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "急停松力时有通道写失败: %s", esp_err_to_name(err));
+    }
+    if (s_mutex != NULL && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_stats.estopped   = true;
+        s_stats.stop_reason = MOTION_STOP_ESTOP;
+        s_stats.running    = false;
+        xSemaphoreGive(s_mutex);
+    }
+}
+
+/* ==========================================================================
+ * 控制任务
+ * ========================================================================== */
+
+/** 按速率上限把 current 朝 target 推进一步 */
+static bool step_towards(float *current, const float *target, float max_step)
+{
+    bool all_done = true;
+
+    for (uint8_t ch = 0; ch < SERVO_MAP_CHANNELS; ++ch) {
+        const float diff = target[ch] - current[ch];
+        if (fabsf(diff) <= max_step) {
+            current[ch] = target[ch];
+            continue;
+        }
+        current[ch] += (diff > 0.0f) ? max_step : -max_step;
+        all_done = false;
+    }
+    return all_done;
+}
+
+static void log_stats_line(void)
+{
+    motion_stats_t st;
+    motion_get_stats(&st);
+
+    ESP_LOGI(TAG,
+             "统计: ticks=%u 周期 us(avg/max)=%lld/%lld 抖动max=%lld us 干活 us(avg/max)=%lld/%lld "
+             "超期=%u I2C写=%u 已到位=%s",
+             (unsigned)st.ticks,
+             (long long)st.period_avg_us, (long long)st.period_max_us,
+             (long long)st.jitter_max_us,
+             (long long)st.work_avg_us, (long long)st.work_max_us,
+             (unsigned)st.overruns,
+             (unsigned)st.i2c_writes, st.settled ? "是" : "否");
+}
+
+static void motion_task(void *arg)
+{
+    (void)arg;
+
+    TickType_t last_wake   = xTaskGetTickCount();
+    int64_t    last_us     = esp_timer_get_time();
+    int64_t    sum_period  = 0;
+    int64_t    sum_work    = 0;
+    int64_t    next_log_us = last_us + (int64_t)MOTION_STATS_LOG_MS * 1000;
+
+    ESP_LOGI(TAG, "控制任务启动: 周期 %u ms (%.0f Hz), 速率上限 %.0f °/s, 超时 %u ms%s",
+             (unsigned)s_period_ms, 1000.0f / (float)s_period_ms,
+             (double)s_rate_dps, (unsigned)s_timeout_ms,
+             (s_timeout_ms == 0) ? "（已关闭）" : "");
+
+    /* 起始点 = 硬件当前姿态（上电时是无脉冲，但这里只关心角度缓存） */
+    if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+        for (uint8_t ch = 0; ch < SERVO_MAP_CHANNELS; ++ch) {
+            if (!s_state.target_valid) {
+                s_state.current[ch] = 0.0f;
+            }
+        }
+        xSemaphoreGive(s_mutex);
+    }
+
+    motion_keepalive();
+
+    while (s_run) {
+        /* 每帧重读周期，这样 motion_set_period_ms() 下一个周期就生效 */
+        const TickType_t period_ticks = pdMS_TO_TICKS(s_period_ms);
+        const int64_t    nominal_us   = (int64_t)s_period_ms * 1000;
+
+        /* ---- 1. 急停优先，最高优先级处理 ---- */
+        if (s_estop) {
+            ESP_LOGE(TAG, "执行急停：12 路松力");
+            (void)servo_out_all_off();
+            if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+                s_stats.estopped    = true;
+                s_stats.stop_reason = MOTION_STOP_ESTOP;
+                xSemaphoreGive(s_mutex);
+            }
+            s_run = false;
+            break;
+        }
+
+        /* ---- 2. 命令超时 ---- */
+        if (s_timeout_ms > 0) {
+            const int64_t idle_us = esp_timer_get_time() - s_last_cmd_us;
+            if (idle_us > (int64_t)s_timeout_ms * 1000) {
+                ESP_LOGW(TAG, "命令超时（%lld ms > %u ms）：松力停车",
+                         (long long)(idle_us / 1000), (unsigned)s_timeout_ms);
+                (void)servo_out_all_off();
+                if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+                    s_stats.stop_reason = MOTION_STOP_TIMEOUT;
+                    xSemaphoreGive(s_mutex);
+                }
+                s_run = false;
+                break;
+            }
+        }
+
+        /* ---- 3. 一帧限速推进 ---- */
+        const int64_t now_us = esp_timer_get_time();
+        int64_t       dt_us  = now_us - last_us;   /* 距上一帧开始的整周期 */
+        last_us = now_us;
+
+        /* dt 异常保护：首次循环、或长时间被抢占（比如日志阻塞）时不要一次走太远 */
+        if (dt_us <= 0) {
+            dt_us = nominal_us;
+        }
+        if (dt_us > 200000) {
+            dt_us = 200000;
+        }
+        const float max_step = s_rate_dps * ((float)dt_us / 1000000.0f);
+
+        bool settled = true;
+        if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+            if (s_state.target_valid) {
+                settled = step_towards(s_state.current, s_state.target, max_step);
+            }
+            xSemaphoreGive(s_mutex);
+        }
+
+        /* ---- 4. 输出（servo_out 内部只写变化的通道） ---- */
+        float snapshot[SERVO_MAP_CHANNELS];
+        if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+            memcpy(snapshot, s_state.current, sizeof(snapshot));
+            xSemaphoreGive(s_mutex);
+        }
+        const esp_err_t err = servo_out_apply_deg(snapshot);
+        if (err != ESP_OK) {
+            /* 单通道写失败已在 servo_out 里记日志，这里不中断控制循环 */
+            ESP_LOGW(TAG, "本帧有通道写入失败（%s），已跳过并在下一帧重试",
+                     esp_err_to_name(err));
+        }
+
+        /* ---- 5. 统计 ---- */
+        const int64_t work_us = esp_timer_get_time() - now_us;
+        sum_period += dt_us;
+        sum_work   += work_us;
+
+        if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+            ++s_stats.ticks;
+            s_stats.period_last_us = dt_us;
+            if (dt_us < s_stats.period_min_us) {
+                s_stats.period_min_us = dt_us;
+            }
+            if (dt_us > s_stats.period_max_us) {
+                s_stats.period_max_us = dt_us;
+            }
+            const int64_t jitter = (dt_us > nominal_us) ? (dt_us - nominal_us)
+                                                        : (nominal_us - dt_us);
+            if (jitter > s_stats.jitter_max_us) {
+                s_stats.jitter_max_us = jitter;
+            }
+            if (dt_us > nominal_us + nominal_us / 2) {
+                ++s_stats.overruns;
+            }
+            s_stats.work_last_us = work_us;
+            if (work_us > s_stats.work_max_us) {
+                s_stats.work_max_us = work_us;
+            }
+            if (s_stats.ticks > 0) {
+                s_stats.period_avg_us = sum_period / (int64_t)s_stats.ticks;
+                s_stats.work_avg_us   = sum_work / (int64_t)s_stats.ticks;
+            }
+            s_stats.settled    = settled;
+            s_stats.i2c_writes = servo_out_write_count();
+            xSemaphoreGive(s_mutex);
+        }
+
+        /* ---- 6. 周期统计日志：这是"10 分钟不重启"的证据 ---- */
+        if (now_us >= next_log_us) {
+            log_stats_line();
+            next_log_us = now_us + (int64_t)MOTION_STATS_LOG_MS * 1000;
+        }
+
+        vTaskDelayUntil(&last_wake, period_ticks);
+    }
+
+    /* ---- 退出：确保舵机是松力状态 ---- */
+    (void)servo_out_all_off();
+
+    if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+        s_stats.running = false;
+        s_stats.settled = true;
+        xSemaphoreGive(s_mutex);
+    }
+
+    ESP_LOGW(TAG, "控制任务结束，原因: %s", motion_stop_reason_str(s_stats.stop_reason));
+
+    s_task = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t motion_init(void)
+{
+    if (s_mutex == NULL) {
+        s_mutex = xSemaphoreCreateMutex();
+        if (s_mutex == NULL) {
+            ESP_LOGE(TAG, "创建状态互斥锁失败");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    memset(&s_state, 0, sizeof(s_state));
+    stats_reset();
+    s_run   = false;
+    s_estop = false;
+
+    ESP_LOGI(TAG, "运动模块就绪（未启动）。默认周期 %u ms、速率 %.0f °/s、超时 %u ms",
+             (unsigned)MOTION_DEFAULT_PERIOD_MS, (double)MOTION_DEFAULT_RATE_DPS,
+             (unsigned)MOTION_DEFAULT_TIMEOUT_MS);
+    return ESP_OK;
+}
+
+esp_err_t motion_start(void)
+{
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_run) {
+        ESP_LOGW(TAG, "控制任务已在运行");
+        return ESP_OK;
+    }
+
+    s_estop = false;
+
+    /* 保留已有目标，但把统计清零重新计 */
+    uint32_t keep_reason = s_stats.stop_reason;
+    float    target[SERVO_MAP_CHANNELS];
+    bool     target_valid;
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    memcpy(target, s_state.target, sizeof(target));
+    target_valid = s_state.target_valid;
+    xSemaphoreGive(s_mutex);
+
+    stats_reset();
+    s_stats.stop_reason = keep_reason;
+    s_stats.running     = true;
+    s_run               = true;
+
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        memcpy(s_state.target, target, sizeof(target));
+        s_state.target_valid = target_valid;
+        xSemaphoreGive(s_mutex);
+    }
+
+    motion_keepalive();
+
+    if (xTaskCreatePinnedToCore(motion_task, "motion", MOTION_TASK_STACK, NULL,
+                                MOTION_TASK_PRIO, &s_task, MOTION_TASK_CORE) != pdPASS) {
+        s_run = false;
+        ESP_LOGE(TAG, "创建控制任务失败（内存不足？）");
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+void motion_stop(uint32_t reason)
+{
+    if (!s_run) {
+        /* 没在跑也要保证松力 */
+        (void)servo_out_all_off();
+        if (s_mutex != NULL && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            s_stats.stop_reason = reason;
+            s_stats.running     = false;
+            xSemaphoreGive(s_mutex);
+        }
+        return;
+    }
+
+    if (s_mutex != NULL && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_stats.stop_reason = reason;
+        xSemaphoreGive(s_mutex);
+    }
+
+    s_run = false;
+
+    /* 等任务自己收尾（它会做 all_off 并 vTaskDelete） */
+    for (int i = 0; i < 100 && s_task != NULL; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (s_task != NULL) {
+        ESP_LOGW(TAG, "控制任务未在 1 秒内退出");
+    }
+}

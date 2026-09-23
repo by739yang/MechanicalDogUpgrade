@@ -11,6 +11,7 @@
 
 #include "app/app_p0.h"
 #include "app/app_cfg_cmd.h"
+#include "app/app_motion_cmd.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -227,7 +228,7 @@ static void selftest(void)
     ESP_LOGI(TAG, "两片 PCA9685 都在线 ✔（位操作扫描共发现 %u 个器件）", (unsigned)n_found);
 
     log_separator();
-    ESP_LOGI(TAG, "步骤 6/6：初始化两片 PCA9685（置安全态）+ 回读校验");
+    ESP_LOGI(TAG, "步骤 6/7：初始化两片 PCA9685（置安全态）+ 回读校验");
     for (size_t i = 0; i < P0_BOARD_COUNT; ++i) {
         esp_err_t err = drv_pca9685_init(s_boards[i], DRV_PCA9685_DEFAULT_HZ);
         if (err != ESP_OK) {
@@ -240,7 +241,11 @@ static void selftest(void)
     }
 
     log_separator();
-    ESP_LOGI(TAG, "P0 自检完成。⚠️ 舵机当前处于「无脉冲/松力」状态，尚未动作。");
+    ESP_LOGI(TAG, "步骤 7/7：舵机输出层 + 运动模块（P2）");
+    app_motion_cmd_init();
+
+    log_separator();
+    ESP_LOGI(TAG, "自检完成。⚠️ 12 路舵机处于「无脉冲/松力」状态，控制任务未启动。");
 }
 
 /* ==========================================================================
@@ -269,6 +274,7 @@ static void cmd_help(void)
     ESP_LOGI(TAG, "  cfg save                      写入 NVS（掉电重启仍生效）");
     ESP_LOGI(TAG, "  cfg load                      从 NVS 重新读取");
     ESP_LOGI(TAG, "  cfg reset                     恢复出厂默认并擦除 NVS");
+    app_motion_cmd_help();
 }
 
 static void cmd_status(void)
@@ -507,6 +513,11 @@ static void handle_line(char *line)
             ++rest;
         }
         app_cfg_cmd_handle(sub, rest);
+    } else if (strcmp(cmd, "motion") == 0 || strcmp(cmd, "stand") == 0 ||
+               strcmp(cmd, "estop") == 0 || strcmp(cmd, "lg") == 0 ||
+               strcmp(cmd, "lgtest") == 0 || strcmp(cmd, "readback") == 0) {
+        /* P2：固定周期运动、站姿、急停、单通道映射核对 */
+        app_motion_cmd_handle(cmd, args);
     } else {
         ESP_LOGW(TAG, "未知命令 '%s'，输入 help 查看用法", cmd);
     }
