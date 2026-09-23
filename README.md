@@ -25,7 +25,11 @@
 │       │   ├── gait_trot        #   TROT 步态       ← PA_TROT.py
 │       │   ├── gait_walk        #   WALK 步态(含重心副作用) ← PA_WALK.py
 │       │   └── filter_moving_avg#   滑动平均(有状态) ← PA_AVGFILT.py
-│       └── app/                # app_p0：P0 自检 + 串口控制台
+│       └── app/                # 应用层
+│           ├── app_p0          #   P0 自检 + 串口控制台
+│           ├── app_config      #   配置结构体 + 校验 + CRC（纯 C，可宿主测试）
+│           ├── app_config_nvs  #   配置的 NVS 持久化后端
+│           └── app_cfg_cmd     #   cfg 控制台命令（含 66 个字段的偏移表）
 ├── tools/
 │   └── golden/                 # 宿主侧 golden 对照测试（不用烧板子）
 │       ├── README.md           # 用法与设计说明
@@ -33,7 +37,7 @@
 │       ├── mpy_stubs.py        # 给 machine / padog 提供最小 stub
 │       ├── check_mpy_loadable.py  # 验证哪些模块能在 CPython 里加载
 │       ├── golden/*.csv        # 参考向量表（已提交，C 测试只读它）
-│       ├── test_*.c            # 宿主测试程序（每个模块一个）
+│       ├── test_*.c            # 宿主测试程序（每个模块一个，含断言式配置测试）
 │       └── run_golden.bat      # 一键：生成 + 编译 + 比对（全部套件）
 ├── diagnostics/                # 上机诊断脚本（Python，跑在电脑上）
 │   ├── board_scan_i2c.py       # 扫描三条候选总线
@@ -67,7 +71,7 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | **P0** | 工程、日志、I2C 扫描、PCA9685 单通道控制 | ✅ **完成**（2026-09-19 上机验收） |
-| P1 | 配置迁移 NVS + 逆运动学 + 姿态/步态纯数学 | 🟡 **进行中** — **纯数学模块全部迁移完毕（5/5）**：golden 测试台跑通 5 套、合计 20 696 项，最大误差 ≤ 6.7e-5（整数项精确相等）；已迁移 `kinematics` / `body_pose` / `gait_trot` / `gait_walk` / `filter_moving_avg`；**待做 NVS 配置** |
+| **P1** | 配置迁移 NVS + 逆运动学 + 姿态/步态纯数学 | ✅ **完成**（2026-09-19）—— 5 个纯数学模块 golden 对照全过（20 696 项，最大误差 ≤ 6.7e-5，整数项精确相等）；配置模块 68 条行为检查全过，NVS 持久化在真机验证（改值 → 保存 → 硬复位 → 值还在） |
 | P2 | 固定周期运动循环 + 12 路舵机输出 | ⬜ 未开始 |
 | P3 | TROT / WALK 步态与姿态数学 | ⬜ 未开始 |
 | P4 | IMU 与稳定控制 | ⛔ 本机无 IMU（决策 F1 = A：暂不加装，P4 再议） |

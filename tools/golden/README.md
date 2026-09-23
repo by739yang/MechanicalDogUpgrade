@@ -174,6 +174,56 @@ RESULT: PASS -- all 264 outputs match exactly
 对负数**向 -∞ 取整**；而 C 的 `/` 是**向 0 截断**。陀螺仪原始值有负数，所以这是真实差异。
 `filter_moving_avg.c` 显式实现了向下取整。
 
+### app_config ← config.py / config_s.py（**不是数值对照，是行为对照**）
+
+```
+implementation : app_config.c   (纯 C，不依赖 ESP-IDF)
+sizeof(app_config_t) = 360 bytes
+checks         : 68   failures: 0
+
+RESULT: PASS -- all 68 checks passed
+```
+
+配置模块和前五个不同：它**不是一个数学函数**，而是一个结构体 + 校验规则 + 持久化。
+所以这里没有 golden CSV，改成一组**断言式检查**：
+
+| 检查组 | 内容 |
+|---|---|
+| defaults | 每一项默认值都与 `config.py` / `config_s.py` 的实测值一致（30 项） |
+| validate | 越界值被限幅到合法区间，且能报出改了哪一项（`changed=11`） |
+| round trip | `save` → `load` 后逐字段相等，CRC 一致 |
+| no saved config | 空存储 → 用默认值 + 返回 `NOENT`（不是报错崩溃） |
+| corrupted CRC | 人为改坏一个字节 → 拒绝载入 + 报 CRC 错，用默认值 |
+| version mismatch | 版本号对不上 → 拒绝载入 + 报版本错，用默认值 |
+| reset | 擦除 + 回默认值 |
+
+**怎么做到不用板子**：持久化后端是通过**函数指针表** `app_cfg_store_t` 注入的，
+所以宿主机上塞一个 RAM 假后端就行，配置逻辑本身零 IDF 依赖。
+真机上换成 NVS 后端（`app_config_nvs.c`），上层代码一行不改。
+
+**这个测试替不了什么**：`app_cfg_store_t` 的假后端在内存里，"配置能熬过一次断电"
+是 **Flash 行为**，宿主机测不了 —— 这一条是在真机上验的（见下）。
+
+真机验证记录（2026-09-19，COM4）：
+
+```
+改 h_goal=70 / faai=0.33 / ap_ssid="TestDog" → cfg save → 硬复位
+  ✅ 配置已从 NVS 载入（version=1, crc=0xE09D2647）
+  ✅ h_goal=70.0  faai=0.330  AP 热点: ssid="TestDog"      ← 熬过断电
+cfg reset
+  ✅ 已恢复出厂默认并擦除 NVS，NVS 条目 168 → 154
+  ✅ 再启动报 NOENT + 用默认值                            ← 擦除确实生效
+限幅（在真机上同样成立，不是只在 PC 上成立）
+  ✅ cfg set h_goal 9999        → 250.0000
+  ✅ cfg set ma_case 5          → 1
+  ✅ cfg set arm_upper_board 0x7F → 64 (0x40)   ← 顺带证明十六进制解析正确
+```
+
+> ⚠️ **这里有个安全细节**：`_board_backup_20260919/config.py` 里有**真实的手机热点 SSID 和密码**。
+> 那份备份是 gitignore 的，绝不会提交。固件里的默认值是**占位符**（`RobotDog` / `robotdog123`），
+> 而且 `test_app_config.c` 里有一条检查专门断言**那个已退役的真实密码不出现在默认值里** ——
+> 防止以后有人图省事把真密码填回源码。
+
 ### ✅ 验证验证器：测试真的有牙齿吗
 
 一次"故意搞破坏"的实验 —— 把 `filter_moving_avg.c` 里的向下取整修正抽掉
@@ -190,7 +240,8 @@ RESULT: FAIL -- 101 of 264 outputs differ
 > 你也可以自己做这个实验：随便改一下某个系数，或者删掉一行修正，重跑 `run_golden.bat`。
 > **应该立刻 FAIL。** 如果改坏了它还 PASS，那才是真问题。
 
-**结论**：四个模块都与 MicroPython 参考**数值等价**（整数滤波器为精确相等）。
+**结论**：五个数学模块都与 MicroPython 参考**数值等价**（整数滤波器为精确相等），
+配置模块的 68 条行为检查全部通过。
 残余误差量级 8e-6 ~ 6e-5，纯粹是 C `float` 与 Python `double` 的舍入差
 （固件刻意用 `float`：ESP32 只有单精度硬件 FPU，`double` 是软件模拟，慢一两个数量级）。
 
@@ -228,8 +279,10 @@ python check_mpy_loadable.py
 
 ## 已知可改进项
 
-三个 `test_*.c` 的比对/报告逻辑高度重复（各约 120 行）。等第 4 个测试出现时
-抽成一个 `golden_util.h` 共享头。现在先保持每个测试文件自包含、便于单读。
+现在有 6 个 `test_*.c`，比对/报告逻辑高度重复（CSV 组各约 120 行）。
+计划抽一个 `golden_util.h` 共享头（CSV 读取 + 最大误差统计 + PASS/FAIL 打印）。
+`test_app_config.c` 是断言式的，只会共用报告部分。
+暂时保持每个测试文件自包含、便于单读。
 
 ---
 
@@ -249,5 +302,9 @@ python check_mpy_loadable.py
 | `gait_trot.c` | `PA_TROT.py` | ✅ 通过（8320 项，最大 1.9e-5 mm） |
 | `filter_moving_avg.c` | `PA_AVGFILT.py` | ✅ 通过（264 项，整数精确相等） |
 | `gait_walk.c` | `PA_WALK.py` | ✅ 通过（7872 项足端 + 2952 项重心整数，最大 6.7e-5 mm） |
+| `app_config.c` | `config.py` / `config_s.py` | ✅ 通过（68 条行为检查；NVS 持久化在真机验证） |
 
-**P1 的纯数学模块全部迁移完毕**（5/5）。剩下的是 NVS 配置（`config.py` / `config_s.py`）。
+**P1 全部完成**：5 个纯数学模块 + 配置模块均已迁移并验证。
+配置的 NVS 持久化已在真机上用"改值 → 保存 → 硬复位 → 值还在"验证过。
+
+下一步是 **P2：控制层与舵机输出**（`PA_SERVO` / `padog` 主循环 / 动作序列）。
