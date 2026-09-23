@@ -87,6 +87,65 @@
 > 上表所有 ✅ 都是**电信号与固件时序**的验证；"发给芯片的脉冲参数对了"
 > **不等于**"狗站起来了"。两条线必须分开报。
 
+## 0.4 ⚠️ P3 的真实范围（2026-09-19 读码后修正，**比原计划大**）
+
+原计划把 P3 写成"把 P1 已迁移的模块接进控制链"，像是接线工作。
+实际读 `padog.py` 之后发现中间还有**两层从没被单独测过、也一行没迁的东西**：
+
+### (1) 大狗缩放层（`padog.py` 186~217、242~248）
+
+| 名字 | 公式 / 值 | 作用 |
+|---|---|---|
+| `_geom_scale()` | `(l1+l2)/leg_len_ref` = 268/149 = **1.7987** | 腿长相对灯哥小机的比例 |
+| `_partial_geom_scale(frac)` | `1 + (gs-1)*frac` | 步幅/重心**故意不**全乘 1.8，否则大狗滑步 |
+| `_ik_hc(r_h)` | `r_h + max(0, (l1+l2)-ref)` = `r_h + 119` | `cal_ges` 的站高（**不乘** `geom_scale`） |
+| `_LARGE_H_TROT_MUL` | 0.96 | 抬腿高度系数 |
+| `_LARGE_STRIDE_XF_MUL` | 0.90 | 步幅系数 |
+| `_LARGE_STRIDE_GEOM_FRAC` | 0.52 | 步幅用多少比例的 `geom_scale` |
+| `_LARGE_STRIDE_XS_RATIO` | 0.0 | 摆动相起点偏移比 |
+| `_LARGE_CG_GEOM_FRAC` | 0.35 | 重心用多少比例的 `geom_scale` |
+| `_LARGE_BWD_CG_MUL` | 0.50 | 后退重心系数 |
+
+### (2) 编排层（`padog.py` 903~1013）
+
+- 抬腿高度按速度自适应：`h_trot *= clamp(s/5.5, 0.62, 0.92)`，非前进再 `*0.82`
+- 步幅：`_xf = spd * 10 * 0.90 * _partial_geom_scale(0.52)`
+- 姿态 **slew 环**：`R_H`/`PIT_S`/`ROL_S`/`X_S` 每帧按 `Kp_H`/`Kp_G` 逼近目标，再限位
+  （`pit_max_ang`/`rol_max_ang`）—— **每次调用只前进一步**，不是一步到位
+- 按步态模式 + 摇杆方向 + `joy_fwd_sign` **选择重心分支**（5 个分支的 if/elif）
+- `_hip_leg_deltas()`（髋辅助偏航）、`_apply_trot_swing_y()`（右侧抬腿降 0.80）
+- `_foot_y_targets()`（前后腿竖直偏置）、`cal_test_shank()`、IK、`servo_output()`
+
+### (3) `padog.py` 里有一张 **59 项的默认值注入表**（第 57~81 行）
+
+config 文件里没有的键，全部由这张表兜底。**它才是"出厂默认值"的真正来源**
+（例如 `shank_ik_bias_per_mm = 0.25`、`trot_right_h_mul = 0.80`、
+`walk_speed_scale = 1.4`、`walk_roll_trim = 3`、`shank_ik_bias_deg = 0.0`）。
+
+⇒ **`app_config_t` 目前缺这些字段**（共 18 项，P3 需要补齐，届时
+`APP_CFG_VERSION` 要 +1）：
+
+```
+shank_ik_bias_per_mm, shank_ik_bias_deg,
+front_leg_y_offset, rear_leg_y_offset,
+leg1_s_trim .. leg4_s_trim, leg2_z_mul .. leg4_z_mul,
+walk_speed_scale, walk_roll_trim, trot_roll_trim, trot_right_h_mul
+```
+
+> 已经核对过、**不需要改**的：`walk_faai`（我之前怀疑它被凭空填了，
+> 实际注入表里就是 0.30，`app_config.c` 的值是对的 —— 见成长手册 P-24）。
+
+### (4) 全链路对照已建立（不用板子）
+
+`tools/golden/` 新增第 8 套：**把原版 `padog.py` 整个 exec 进来、直接调用
+`mainloop()`**，逐行记录它写出的 12 组占空比，与 C 版 `control_chain.c` 对照。
+⇒ 连上面 (1)(2)(3) 这些"从没测过的东西"一起进了对照范围。
+⇒ 90 行输入覆盖：站立 / 原地踏步 / 前进 / 后退 / 转弯 / WALK / 爬行 /
+   姿态 slew 未到位 / 超限限位。
+⇒ **`t` 只在 `[0, Ts]` 内取值** —— 原版 `cal_t()` 没有 else，`t > Ts` 会崩，
+   那不是原版的可达域（详见成长手册 P-19）。
+
+
 ## 1. 当前 MicroPython 控制链
 
 ```text

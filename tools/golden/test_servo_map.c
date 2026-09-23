@@ -184,8 +184,20 @@ static int run_output(const char *path)
         return 2;
     }
 
-    /* 1 + 4 + 4 + 4 + 4 + 12 + 4 + 3 + 24 = 60 */
-    enum { EXPECT_FIELDS = 60 };
+    /*
+     * 列布局（64 列），与 gen_golden.py 的 gen_servo_output() 一一对应：
+     *   0      ik（1 = 走 IK 路径）
+     *   1..4   ROL_S, PIT_S, joy_turn, crawl_phase  —— 参考实现算 hip/cs 用的**输入**
+     *   5..8   h1..h4   （由真版 `_hip_leg_deltas()` 算出）
+     *   9..12  ham1..ham4
+     *   13..16 shank1..shank4
+     *   17..20 cs1..cs4 （由真版 `_crawl_shank_servodelta()` 算出）
+     *   21..32 中位角 12 个（腿1..腿4 × 髋/大/小）
+     *   33..36 s_trim × 4
+     *   37..39 l1, l2, leg_len_ref
+     *   40..63 12 组 (ON, OFF)，顺序为逻辑通道 0..11
+     */
+    enum { EXPECT_FIELDS = 64 };
     double v[FIELDS_MAX];
 
     char line[LINE_MAX];
@@ -213,6 +225,7 @@ static int run_output(const char *path)
 
         int k = 0;
         in.ik_path = (v[k++] != 0.0);
+        k += 4;   /* ROL_S / PIT_S / joy_turn / crawl_phase —— 只用来生成参考值 */
         for (int i = 0; i < 4; ++i) { in.hip[i] = (float)v[k++]; }
         for (int i = 0; i < 4; ++i) { in.ham[i] = (float)v[k++]; }
         for (int i = 0; i < 4; ++i) { in.shank[i] = (float)v[k++]; }

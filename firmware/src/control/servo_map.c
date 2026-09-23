@@ -116,12 +116,35 @@ const char *servo_map_channel_name(uint8_t logical_ch)
 
 float servo_map_shank_bias(float l1, float l2, float leg_len_ref)
 {
-    /* 复刻 padog._shank_ik_bias() 的 per_mm 分支：per_mm 固定 0.375 */
+    /*
+     * 复刻 padog._shank_ik_bias() 的 per_mm 分支。
+     *
+     * ⚠️ per_mm = **0.25**，不是函数据里那个 0.375 的兜底值。
+     *    `_shank_ik_bias()` 是这样写的：
+     *        per_mm = 0.375
+     *        try: per_mm = float(shank_ik_bias_per_mm)
+     *        except NameError: pass
+     *    而 padog.py 第 61 行的**默认值注入表**里定义了
+     *        ("shank_ik_bias_per_mm", 0.25)
+     *    所以 `float(...)` 永远成功，实际用的是 **0.25**，兜底值 0.375 是死代码。
+     *    实测：`(130+138-149) * 0.25 = 29.75`。
+     *
+     *    这个坑很值得记：我的第一版参考值是在一个**手搭的命名空间**里跑的，
+     *    没有跑那个默认值注入表，于是参考值也算出 0.375 —— **参考值和 C 版
+     *    错在同一个地方**，测试全绿却都是错的（同类问题见成长手册 P-21/P-22）。
+     *    现在 `servo_output` 与 `control_chain` 两套参考值都直接 exec 真版 padog.py。
+     */
     float extra = (l1 + l2) - leg_len_ref;
     if (extra < 0.0f) {
         extra = 0.0f;
     }
-    return extra * 0.375f;
+    return extra * 0.25f;
+}
+
+/** `_shank_ik_bias()` 里那个 per_mm 常量，导出给测试打印用 */
+float servo_map_shank_bias_per_mm(void)
+{
+    return 0.25f;
 }
 
 float servo_map_shank_curve(float x, float leg_trim, float bias)

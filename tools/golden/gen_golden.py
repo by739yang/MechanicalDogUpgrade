@@ -522,77 +522,65 @@ def gen_servo_angle(fh, ch_samples, duty_samples):
     return rows
 
 
-def gen_servo_output(fh, cases):
+def gen_servo_output(fh, cases, tmpdir):
     """
     关节角 -> 12 路舵机输出
 
+    ⚠️ 参考值用的是**真版 padog.py 的命名空间**（不是手搭的）。
+    第一版是 `extract_padog_funcs` 手工拼命名空间，结果漏掉了 padog.py
+    第 57~81 行的**默认值注入表** —— 于是 `shank_ik_bias_per_mm` 取不到，
+    `_shank_ik_bias()` 退到死代码兜底值 0.375，而 C 版也硬编码 0.375，
+    **两边错在同一个地方，测试全绿**。同类教训见成长手册 P-21 / P-22。
+
+    现在 `hip` 与 `cs` 也由真版函数算出来再写进 CSV
+    （`_hip_leg_deltas()` / `_crawl_shank_servodelta()`）——
+    手填的输入列 = 将来某天的假 FAIL 或假 PASS。
+
     CSV 列（逗号分隔）：
-      ik, h1..h4, ham1..ham4, sh1..sh4, cs1..cs4, init×12, trim×4, l1, l2, ref,
-      然后 12 组 (on,off) —— 顺序为**逻辑通道 0..11**
+      ik, ROL_S, PIT_S, joy_turn, crawl, h1..h4, ham×4, sh×4, cs×4,
+      init×12, trim×4, l1, l2, ref, 然后 12 组 (on,off) —— 顺序为**逻辑通道 0..11**
     """
-    ns_servo, rec = load_servo_module()
-
-    ns = extract_padog_funcs(_PADOG_FUNCS)
-    # servo_output 用 `PA_SERVO.angle(...)`，所以这里要一个支持属性访问的对象，
-    # 而不是 dict —— 直接给它**真的** PA_SERVO 命名空间。
-    ns["PA_SERVO"] = _AttrNS(ns_servo)
-    ns["CRAWL_SHANK_FRONT"] = 20.0
-    ns["CRAWL_SHANK_REAR"] = 30.0
-    ns["crawl_phase"] = 0
-
-    hips = [0.0, 0.0, 0.0, 0.0]
-
-    def hip_provider():
-        return tuple(hips)
-
-    ns["_hip_leg_deltas"] = hip_provider
-    servo_output = ns["servo_output"]
-
-    # 逻辑通道 -> (addr, pca_ch)，与 C 版 servo_map.c 的表一致
     LOGICAL = [(0x40, 0), (0x40, 1), (0x40, 2), (0x40, 3), (0x40, 4), (0x40, 5),
                (0x41, 0), (0x41, 1), (0x41, 2), (0x41, 3), (0x41, 4), (0x41, 5)]
 
     rows = 0
     for c in cases:
+        ns = load_padog_ns(tmpdir)
+        rec = sys.modules["PA_SERVO"]._i2c_servo
+
         ns["l1"] = c["l1"]
         ns["l2"] = c["l2"]
         ns["leg_len_ref"] = c["ref"]
+        ns["ROL_S"] = c["rol_s"]
+        ns["PIT_S"] = c["pit_s"]
+        ns["joy_turn"] = c["joy_turn"]
         ns["crawl_phase"] = c["crawl"]
-        hips[:] = c["hip"]
-        # 中位角在 padog.py 里是**模块级全局**（来自 config_s.py），不是形参 ——
-        # 所以每次调用前把它们塞进命名空间，顺便证明 C 版真的用了配置里的中位角。
+
+        # 中位角在 padog.py 里是模块级全局（来自 config_s.py），不是形参
         _joints = ("p", "h", "s")   # 髋 / 大腿 / 小腿
         for i, val in enumerate(c["init"]):
-            leg_n = i // 3 + 1
-            ns["init_%d%s" % (leg_n, _joints[i % 3])] = val
+            ns["init_%d%s" % (i // 3 + 1, _joints[i % 3])] = val
         for i in range(4):
-            # _leg_cfg("s_trim", n) 查的是 globals()["leg{n}_s_trim"]
-            ns.pop("leg%d_s_trim" % (i + 1), None)
-            if c["trim"][i] != 0.0:
-                ns["leg%d_s_trim" % (i + 1)] = c["trim"][i]
+            ns["leg%d_s_trim" % (i + 1)] = c["trim"][i]
+
+        # hip 与 cs 由**真版函数**算，保证与参考值实际用到的完全一致
+        hip = list(ns["_hip_leg_deltas"]())
+        cs = [ns["_crawl_shank_servodelta"](n) for n in (1, 2, 3, 4)]
 
         rec.clear()
-        # cs 由原实现自己算（`_crawl_shank_servodelta`），**不要**在这里手填 ——
-        # CSV 里的 cs 必须与参考值真正用到的一致，否则测的是一个不存在的组合。
-        cs_ref = [ns["_crawl_shank_servodelta"](n) for n in (1, 2, 3, 4)]
-
-        # 原实现形参顺序：case, init, ham1..ham4, shank1..shank4
-        servo_output(int(c["mode_case"]), int(c["mode_init"]),
-                     c["ham"][0], c["ham"][1], c["ham"][2], c["ham"][3],
-                     c["shank"][0], c["shank"][1], c["shank"][2], c["shank"][3])
+        ns["servo_output"](int(c["mode_case"]), int(c["mode_init"]),
+                           c["ham"][0], c["ham"][1], c["ham"][2], c["ham"][3],
+                           c["shank"][0], c["shank"][1], c["shank"][2], c["shank"][3])
 
         got = {(a, ch): (on, off) for (a, ch, on, off) in rec.led_writes()}
         if len(got) != 12:
             raise SystemExit("期望 12 个通道，实际 %d 个：%s" % (len(got), sorted(got)))
 
         fields = [1 if (int(c["mode_case"]) == 0 and int(c["mode_init"]) == 0) else 0]
-        fields += c["hip"]
-        fields += c["ham"]
-        fields += c["shank"]
-        fields += cs_ref
-        fields += c["init"]
-        fields += c["trim"]
-        fields += [c["l1"], c["l2"], c["ref"]]
+        fields += [c["rol_s"], c["pit_s"], c["joy_turn"], c["crawl"]]
+        fields += hip
+        fields += c["ham"] + c["shank"] + cs
+        fields += c["init"] + c["trim"] + [c["l1"], c["l2"], c["ref"]]
         for key in LOGICAL:
             on, off = got[key]
             fields += [on, off]
@@ -602,7 +590,7 @@ def gen_servo_output(fh, cases):
         ) + "\n")
         rows += 1
 
-    print("  servo_output golden 行数: %d" % rows)
+    print("  servo_output golden 行数: %d  (参考值 = 真版 padog 命名空间)" % rows)
     return rows
 
 
@@ -627,16 +615,18 @@ def servo_output_cases(n_random=60, seed=20260919):
     cases = []
     rnd = random.Random(seed)
 
-    def mk(ik, ham, shank, cs=None, hip=None, trim=None, crawl=0,
+    def mk(ik, ham, shank, rol_s=0.0, pit_s=0.0, joy_turn=0.0, trim=None, crawl=0,
            l1=130.0, l2=138.0, ref=149.0, init=None):
         # 注意："mode_*" 是 servo_output 的形参 case/init；"init" 是 12 个中位角。
         # 两者同名会互相覆盖，所以显式分开命名。
-        # 这里**不接受** cs：crawl 压低增量必须由参考实现自己算出来再写进 CSV，
-        # 否则 CSV 里写的和参考值实际用到的会是两个数（这个坑我踩过一次）。
+        # `hip` 与 `cs` **不由这里提供**：它们必须由参考实现自己算出来
+        # （`_hip_leg_deltas()` / `_crawl_shank_servodelta()`），
+        # 否则 CSV 里写的和参考值实际用到的会是两个数（P-22 踩过一次）。
+        # 这里只提供**真正的输入**：ROL_S / PIT_S / joy_turn / crawl_phase。
         return {
             "mode_case": 0 if ik else 1,
             "mode_init": 0 if ik else 1,
-            "hip": list(hip) if hip else [0.0, 0.0, 0.0, 0.0],
+            "rol_s": rol_s, "pit_s": pit_s, "joy_turn": joy_turn,
             "ham": list(ham),
             "shank": list(shank),
             "init": list(init) if init else list(REAL_INIT),
@@ -647,10 +637,12 @@ def servo_output_cases(n_random=60, seed=20260919):
     # 1) 站姿：ham≈90、shank≈40（由中位角反推，见 servo_map.h 注释）
     cases.append(mk(True, [90.0] * 4, [40.0] * 4))
     cases.append(mk(False, [0.0] * 4, [0.0] * 4))
-    # 2) 髋辅助偏航（原 _hip_leg_deltas 的输出），含正负与限幅值
-    for hip in ([5.0, -5.0, 5.0, -5.0], [18.0, -18.0, 18.0, -18.0], [-20.0, 20.0, -20.0, 20.0]):
-        cases.append(mk(True, [90.0] * 4, [40.0] * 4, hip=hip))
-        cases.append(mk(False, [0.0] * 4, [0.0] * 4, hip=hip))
+    # 2) 髋辅助偏航：通过**真正的输入** ROL_S / PIT_S / joy_turn 驱动
+    #    （`_hip_leg_deltas()` 会自己把它们换算成 h1..h4；顺带也测了这个函数）
+    for (rs, ps, jt) in ((5.0, 0.0, 0.0), (-5.0, 3.0, 0.0), (0.0, 0.0, 100.0),
+                         (0.0, 0.0, -100.0), (12.0, -8.0, 60.0), (0.0, 0.0, 8.0)):
+        cases.append(mk(True, [90.0] * 4, [40.0] * 4, rol_s=rs, pit_s=ps, joy_turn=jt))
+        cases.append(mk(False, [0.0] * 4, [0.0] * 4, rol_s=rs, pit_s=ps, joy_turn=jt))
     # 3) 爬行压低增量（由原 _crawl_shank_servodelta 算出：腿1=-20 腿2=+20 腿3=+30 腿4=-30）
     cases.append(mk(True, [90.0] * 4, [40.0] * 4, crawl=1))
     cases.append(mk(True, [70.0] * 4, [55.0] * 4, crawl=1))
@@ -677,12 +669,216 @@ def servo_output_cases(n_random=60, seed=20260919):
             rnd.random() < 0.75,
             [rnd.uniform(20.0, 150.0) for _ in range(4)],
             [rnd.uniform(-20.0, 120.0) for _ in range(4)],
-            hip=[rnd.uniform(-18.0, 18.0) for _ in range(4)],
+            rol_s=rnd.uniform(-12.0, 12.0),
+            pit_s=rnd.uniform(-12.0, 12.0),
+            joy_turn=rnd.choice([0.0, 8.0, 35.0, -35.0, 100.0, -100.0]),
             trim=[rnd.uniform(-8.0, 8.0) for _ in range(4)],
             crawl=rnd.randint(0, 1),
             l1=rnd.choice([130.0, 125.0, 140.0]),
             l2=rnd.choice([138.0, 130.0, 145.0]),
             ref=rnd.choice([149.0, 145.0, 160.0]),
+        ))
+    return cases
+
+
+# ============================================================================
+#  P3: 全链路对照 (control_chain.c)
+# ============================================================================
+#
+# 前面每个 suite 都是"一个模块对一个模块"。这一套不一样：它对照的是
+# **整条控制链**，而且参考值不是我把模块拼起来，而是 ——
+#
+#     把 micropython/padog.py **整个 exec 进来，直接调用它的 mainloop()**
+#
+# 也就是"原版固件真正在做的那一步"。这样连那些**从来没被单独测过**的东西
+# 也一起对照了：
+#   - 大狗缩放层（_geom_scale / _partial_geom_scale / _ik_hc / 6 个 _LARGE_* 系数）
+#   - 姿态 slew 环（R_H / PIT_S / ROL_S / X_S 按 Kp 逼近目标）与限位
+#   - 按步态模式与摇杆方向**选择重心分支**的那一大串 if/elif
+#   - _hip_leg_deltas / _trot_rol_s / _walk_rol_s / _apply_trot_swing_y …
+#
+# 输入（CSV 每行）：spd, L, R, gait, t, R_H, H_goal, PIT_S, PIT_goal,
+#                   ROL_S, ROL_goal, X_S, X_goal, joy_turn, crawl_phase
+# 输出：12 组 (on, off)
+
+#: padog.mainloop() 依赖的、来自 config 的模块级名字（数学路径用到的全部）
+_CHAIN_CFG_KEYS = (
+    "Ts", "faai", "pit_max_ang", "rol_max_ang", "xs_max",
+)
+
+
+def _chain_config_text():
+    """从脱敏模板生成一份可用于对照的 config.py（见 mpy_stubs.load_padog_source）。"""
+    text = (MPY / "config.example.py").read_text(encoding="utf-8")
+    return mpy_stubs._neutralize_wifi_calls(text)
+
+
+def load_padog_ns(tmpdir):
+    """exec 一次 padog.py，返回它的命名空间（含 mainloop）。"""
+    cfg_path = Path(tmpdir) / "config_for_golden.py"
+    cfg_path.write_text(_chain_config_text(), encoding="utf-8")
+
+    mpy_stubs.install_for_mainloop()
+
+    # padog.py 里有 `import PA_SERVO` / `import PA_TROT` 等，需要 micropython/ 在 sys.path 上
+    if str(MPY) not in sys.path:
+        sys.path.insert(0, str(MPY))
+
+    src = mpy_stubs.load_padog_source(cfg_path)
+    ns = {"__name__": "padog_ref", "__file__": str(MPY / "padog.py")}
+    exec(compile(src, "padog.py", "exec"), ns)
+
+    # ---- 把 WALK 的 IMU 路径**按硬件事实**固定为"关闭" ----
+    #
+    # `PA_WALK._init_imu()` 在没有 IMU 时会走 except 分支把 acc 置 None，
+    # 于是 `_read_gyro_p()` 恒返回 0。本机**确实没有 IMU**（4 次独立实测，
+    # 见 HANDOFF.md），所以"gyro_p 恒为 0"就是板子上的真实行为。
+    #
+    # 为什么不让它自己去失败：那样失败原因会是"stub 缺 sleep_ms"或
+    # "记录型 I2C 不会报错所以 accel() 竟然成功了"，两者都与板子无关，
+    # 反而可能把 IMU 路径**打开**（板子上它是关的）→ 参考值就错了。
+    # 显式关掉 = 与板子一致，且理由写在这里。
+    import PA_WALK
+    PA_WALK.acc = None
+    PA_WALK._f_gyro_p = None
+    PA_WALK.gyro_p = 0.0
+    PA_WALK._read_gyro_p = lambda: 0.0
+    return ns
+
+
+def gen_control_chain(fh, cases, tmpdir):
+    """
+    每行输入跑一次原版 mainloop()，记录它写出的 12 组 (ON, OFF)。
+
+    ⚠️ mainloop 会修改 t / R_H / PIT_S / ROL_S / X_S 等全局量，
+    所以**每个 case 都重新 exec 一遍 padog.py**（模块级状态归零）。
+    这样就不存在"上一条 case 污染下一条"的风险 —— 代价只是多花一两秒。
+    """
+    LOGICAL = [(0x40, 0), (0x40, 1), (0x40, 2), (0x40, 3), (0x40, 4), (0x40, 5),
+               (0x41, 0), (0x41, 1), (0x41, 2), (0x41, 3), (0x41, 4), (0x41, 5)]
+
+    rows = 0
+    for c in cases:
+        ns = load_padog_ns(tmpdir)
+        rec = ns["_i2c_servo"] if "_i2c_servo" in ns else None
+        if rec is None:
+            # padog 不直接持有 I2C，是 PA_SERVO 顶层建的
+            import PA_SERVO  # noqa: F401
+            rec = sys.modules["PA_SERVO"]._i2c_servo
+
+        # 注入本 case 的输入
+        for k, v in c.items():
+            ns[k] = v
+        # 这些是 mainloop 里会被读写、且必须处于"干净初值"的量
+        ns["stop_run_node"] = 0
+        ns["direct_pose_freeze"] = False
+        ns["pose_anim_active"] = False
+        ns["inplace_step_end_ms"] = 0
+        ns["key_stab"] = False
+
+        rec.clear()
+        ns["mainloop"]()
+
+        got = {(a, ch): (on, off) for (a, ch, on, off) in rec.led_writes()}
+        if len(got) != 12:
+            raise SystemExit("case %d 期望 12 路，实际 %d 路：%s" % (
+                rows, len(got), sorted(got)))
+
+        fields = [c[k] for k in CHAIN_INPUT_KEYS]
+        for key in LOGICAL:
+            on, off = got[key]
+            fields += [on, off]
+        fh.write(",".join(
+            ("%d" % f) if isinstance(f, int) else ("%.6f" % f) for f in fields
+        ) + "\n")
+        rows += 1
+
+    print("  control_chain golden 行数: %d  (参考值 = 原版 mainloop() 真跑一次)" % rows)
+    return rows
+
+
+#: CSV 里的输入列顺序（C 侧按同一顺序解析）
+CHAIN_INPUT_KEYS = (
+    "spd", "L", "R", "gait_mode", "t", "R_H", "H_goal",
+    "PIT_S", "PIT_goal", "ROL_S", "ROL_goal", "X_S", "X_goal",
+    "joy_turn", "crawl_phase",
+)
+
+
+def control_chain_cases(n_random=90, seed=20260919):
+    """
+    生成 mainloop 的输入组合：站立 / 原地踏步 / 前进 / 后退 / 转弯 / WALK / 爬行。
+
+    ⚠️ **`t` 只在 [0, Ts] 内取值**，这不是保守，而是必须：
+    `PA_TROT.cal_t()` 只有 `t<=Ts*faai` 与 `t>Ts*faai and t<=Ts` 两个分支、
+    **没有 else**（成长手册 P-19），所以 `t > Ts` 会让原版直接
+    `UnboundLocalError`。原版永远不会踩到，因为 `mainloop()` 里
+    `if t >= Ts: t = t - Ts` 先把相位回绕了。
+    C 版**故意**对 `t<0 || t>Ts` 做了回绕（迁移表 §8.10），
+    所以喂越界输入等于在测"我自己的改进"，而不是在测等价性。
+    ⇒ 全链路对照只在**原版的可达域**内做；越界行为差异单独记录。
+    """
+    rnd = random.Random(seed)
+
+    def mk(spd, L, R, gait, t=0.0, R_H=81.0, H_goal=81.0,
+           PIT_S=0.0, PIT_goal=0.0, ROL_S=0.0, ROL_goal=0.0,
+           X_S=18.0, X_goal=18.0, joy_turn=0.0, crawl_phase=0):
+        return {
+            "spd": float(spd), "L": L, "R": R, "gait_mode": gait, "t": float(t),
+            "R_H": float(R_H), "H_goal": float(H_goal),
+            "PIT_S": float(PIT_S), "PIT_goal": float(PIT_goal),
+            "ROL_S": float(ROL_S), "ROL_goal": float(ROL_goal),
+            "X_S": float(X_S), "X_goal": float(X_goal),
+            "joy_turn": float(joy_turn), "crawl_phase": int(crawl_phase),
+        }
+
+    cases = []
+    # 1) 站立（spd=L=R=0）：走"无重心偏置"分支
+    cases.append(mk(0, 0, 0, 0))
+    cases.append(mk(0, 0, 0, 0, PIT_S=5.0, PIT_goal=5.0, ROL_S=-4.0, ROL_goal=-4.0))
+    cases.append(mk(0, 0, 0, 0, R_H=60.0, H_goal=60.0, X_S=0.0, X_goal=0.0))
+    # 2) TROT 前进（L=R=1）—— 走 trot_cg_f 分支
+    for t in (0.0, 0.1, 0.21, 0.42, 0.5, 0.79, 0.99):
+        cases.append(mk(-3.0, 1, 1, 0, t=t))
+    # 3) TROT 后退（joy_fwd_sign=-1 时 spd 正即后退）
+    for t in (0.0, 0.3, 0.7):
+        cases.append(mk(3.0, 1, 1, 0, t=t))
+    # 4) 原地踏步（L=R=0 但 spd!=0）—— spd 不为 0，走 trot_cg_t 分支
+    for t in (0.0, 0.25, 0.6):
+        cases.append(mk(3.0, 0, 0, 0, t=t))
+    # 5) 转向（joy_turn 超过 HIP_TURN_DEAD=10）
+    for jt in (100.0, -100.0):
+        for t in (0.0, 0.35, 0.8):
+            cases.append(mk(-2.5, -1, 1, 0, t=t, joy_turn=jt))
+    # 6) WALK（gait_mode=1）
+    for t in (0.0, 0.12, 0.3, 0.55, 0.88):
+        cases.append(mk(-2.0, 1, 1, 1, t=t))
+    cases.append(mk(2.0, 1, 1, 1, t=0.4))
+    cases.append(mk(2.0, 0, 0, 1, t=0.4))
+    # 7) 爬行压低（crawl_phase=1 -> cs 非零）
+    for t in (0.0, 0.4):
+        cases.append(mk(-3.0, 1, 1, 0, t=t, crawl_phase=1))
+    # 8) 姿态 slew 环未到位（目标 != 当前，验证 Kp 逼近这一步）
+    cases.append(mk(0, 0, 0, 0, PIT_S=0.0, PIT_goal=12.0, ROL_S=0.0, ROL_goal=-8.0))
+    cases.append(mk(0, 0, 0, 0, R_H=150.0, H_goal=70.0, X_S=0.0, X_goal=40.0))
+    cases.append(mk(-3.0, 1, 1, 0, t=0.2, PIT_S=-3.0, PIT_goal=3.0, X_S=0.0, X_goal=30.0))
+    # 9) 超限（验证 pit_max_ang / rol_max_ang 限位）
+    cases.append(mk(0, 0, 0, 0, PIT_S=40.0, PIT_goal=40.0))
+    cases.append(mk(0, 0, 0, 0, ROL_S=-40.0, ROL_goal=-40.0))
+    # 10) 随机（固定种子，可复现）
+    while len(cases) < n_random:
+        gait = rnd.randint(0, 1)
+        spd = rnd.choice([-4.0, -3.0, -1.5, 0.0, 1.5, 3.0, 4.0])
+        lr = rnd.choice([(1, 1), (-1, 1), (1, -1), (-1, -1), (0, 0), (1, 0)])
+        cases.append(mk(
+            spd, lr[0], lr[1], gait,
+            t=rnd.uniform(0.0, 0.95),
+            R_H=rnd.uniform(50.0, 110.0), H_goal=rnd.uniform(50.0, 110.0),
+            PIT_S=rnd.uniform(-10.0, 10.0), PIT_goal=rnd.uniform(-10.0, 10.0),
+            ROL_S=rnd.uniform(-10.0, 10.0), ROL_goal=rnd.uniform(-10.0, 10.0),
+            X_S=rnd.uniform(-20.0, 40.0), X_goal=rnd.uniform(-20.0, 40.0),
+            joy_turn=rnd.choice([0.0, 35.0, -35.0, 100.0, -100.0]),
+            crawl_phase=rnd.randint(0, 1),
         ))
     return cases
 
@@ -735,11 +931,17 @@ def main():
     with open(OUT / "servo_angle.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_servo_angle(fh, ang, duties)
 
-    print("\n[7/7] padog.servo_output -> servo_map.c（关节角 -> 12 路）...")
-    with open(OUT / "servo_output.csv", "w", encoding="utf-8", newline="\n") as fh:
-        total += gen_servo_output(fh, servo_output_cases())
+    print("\n[7/8] padog.servo_output -> servo_map.c（关节角 -> 12 路）...")
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(OUT / "servo_output.csv", "w", encoding="utf-8", newline="\n") as fh:
+            total += gen_servo_output(fh, servo_output_cases(), tmpdir)
 
-    print("\n完成。共 7 个 suite, %d 行。" % total)
+        print("\n[8/8] padog.mainloop() -> control_chain.c（全链路，P3）...")
+        with open(OUT / "control_chain.csv", "w", encoding="utf-8", newline="\n") as fh:
+            total += gen_control_chain(fh, control_chain_cases(), tmpdir)
+
+    print("\n完成。共 8 个 suite, %d 行。" % total)
     print("提示：这些 CSV 要提交进仓库，C 版测试只读它们。")
 
 

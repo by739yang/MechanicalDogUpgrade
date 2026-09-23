@@ -15,6 +15,10 @@ mpy_stubs.py —— 给纯数学的 MicroPython 模块提供最小 stub
 """
 import sys
 import types
+from pathlib import Path
+
+#: 仓库根下的 micropython/ —— 原始参考代码所在
+MPY_DIR = Path(__file__).resolve().parents[2] / "micropython"
 
 
 def _make_machine():
@@ -141,10 +145,124 @@ class RecordingI2C:
 
 
 class FakePin:
-    """只记引脚号。PA_SERVO 顶层 I2C(0, scl=Pin(22), sda=Pin(21)) 需要它能被构造。"""
+    """
+    只记引脚号，不驱动任何东西。
 
-    def __init__(self, num, *a, **kw):
+    `PA_SERVO` 顶层要 `Pin(22)`，`padog.py` 顶层要 `Pin(2, Pin.OUT)` 然后
+    `led.value(0/1)` —— 所以还得提供 `OUT` / `IN` 这两个类属性与 `value()`。
+    """
+
+    OUT = 1
+    IN = 0
+    PULL_UP = 2
+    PULL_DOWN = 3
+
+    def __init__(self, num, mode=None, *a, **kw):
         self.num = num
+        self.mode = mode
+        self._val = 0
+        self.writes = []
+
+    def value(self, v=None):
+        if v is None:
+            return self._val
+        self._val = v
+        self.writes.append(v)
+
+    def on(self):
+        self.value(1)
+
+    def off(self):
+        self.value(0)
+
+
+def _make_utime():
+    """MicroPython 的 utime —— 用真实时钟实现就够了，参考值与时间无关。"""
+    import time as _t
+    m = types.ModuleType("utime")
+    m.ticks_ms = lambda: int(_t.monotonic() * 1000) & 0x3FFFFFFF
+    m.ticks_us = lambda: int(_t.monotonic() * 1000000) & 0x3FFFFFFF
+    m.ticks_diff = lambda a, b: a - b
+    m.ticks_add = lambda a, b: a + b
+    m.sleep_ms = lambda ms: _t.sleep(ms / 1000.0)
+    m.sleep_us = lambda us: None
+    m.sleep = lambda s: _t.sleep(s)
+    return m
+
+
+def _make_mech_arm():
+    """机械臂：mainloop 里调它的 tick()，与运动数学无关。"""
+    m = types.ModuleType("mech_arm")
+    m.tick = lambda *a, **k: None
+    m.init_arm_pose = lambda *a, **k: None
+    m.init_grip = lambda *a, **k: None
+    return m
+
+
+def _make_network():
+    m = types.ModuleType("network")
+    m.STA_IF = 0
+    m.AP_IF = 1
+    return m
+
+
+def install_for_mainloop():
+    """
+    为 exec **整个 padog.py** 准备环境。
+
+    与 `install_for_servo()` 的区别：这次要跑的是主循环，所以还要
+    `utime` / `mech_arm` / `network` 这几个 MicroPython 侧的名字，
+    以及能做 `Pin(2, Pin.OUT).value(0)` 的引脚 stub。
+
+    注意：**仍然不模拟任何硬件行为**。参考值 = 原代码要求硬件做的事。
+    """
+    install_for_servo()
+    for name, factory in (("utime", _make_utime),
+                          ("mech_arm", _make_mech_arm),
+                          ("network", _make_network)):
+        if name not in sys.modules:
+            sys.modules[name] = factory()
+
+
+def load_padog_source(config_py_text):
+    """
+    读 `micropython/padog.py`，并处理它模块级的
+        exec(open('config.py').read())
+        exec(open('config_s.py').read())
+    这两行：
+
+    - `config_s.py` 用**仓库里的真文件**（它与板子备份逐字节相同）。
+    - `config.py` 公开仓库里只有脱敏的 `config.example.py`（真文件含 WiFi 凭据，
+      在 gitignore 的备份目录里）。数学路径需要的键（`Ts`/`faai`/`pit_max_ang`/
+      `rol_max_ang`/`xs_max`）example 里全都有。
+    - `do_connect_STA()` / `do_connect_AP()` 这两行**必须注释掉**：
+      前者是 `while not wifi.isconnected(): pass` 的死循环（成长手册 P-16），
+      在电脑上会直接挂住。这一段与运动数学毫无关系。
+    """
+    src = (MPY_DIR / "padog.py").read_text(encoding="utf-8")
+    # ⚠️ 必须显式带上 encoding='utf-8'：
+    #    padog.py 里是 `open('config.py').read()`，用的是**系统默认编码**。
+    #    在板子上是 UTF-8 所以没事；在中文 Windows 上是 GBK，会直接
+    #    UnicodeDecodeError（这正是成长手册 P-01 那个坑的另一副面孔）。
+    #    我们的替身文件是 UTF-8 写的，所以读取端也必须是 UTF-8。
+    src = src.replace("open('config.py')",
+                      "open(%r, encoding='utf-8')" % str(config_py_text))
+    src = src.replace("open('config_s.py')",
+                      "open(%r, encoding='utf-8')" % str(MPY_DIR / "config_s.py"))
+    return src
+
+
+def _neutralize_wifi_calls(text):
+    """把 config.py 里的 do_connect_STA(...) / do_connect_AP() 调用注释掉。"""
+    out = []
+    for line in text.splitlines():
+        s = line.lstrip()
+        if s.startswith("do_connect_STA(") or s.startswith("do_connect_AP("):
+            out.append("# [golden] 已注释：" + line)
+        else:
+            out.append(line)
+    return "\n".join(out) + "\n"
+
 
 
 def install_for_servo():

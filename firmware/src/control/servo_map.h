@@ -123,13 +123,17 @@ const servo_map_hw_t *servo_map_hw(uint8_t logical_ch);
  * @brief 复刻 `padog._shank_ik_bias()`。
  *
  * 大狗在同一 Hc 下 IK 小腿角比小机低 20°+，进曲线前先加这个偏置：
- *   `extra = max(0, (l1 + l2) - leg_len_ref)`，`bias = extra * 0.375`
- * 实测值：`(130+138-149) * 0.375 = 44.625`。
+ *   `extra = max(0, (l1 + l2) - leg_len_ref)`，`bias = extra * per_mm`
+ * `per_mm` 来自 `padog.py` 的默认值注入表：**0.25**
+ * （实测 `(130+138-149) * 0.25 = 29.75`）。
  *
- * ⚠️ 原实现还会先看模块级 `shank_ik_bias_deg`，但 `config_s.py` 里没有这个变量，
- *    所以走的是 per_mm 这条路。C 版只实现这条（并把这事实写在这里）。
+ * ⚠️ 函数据里那个 `per_mm = 0.375` 是**死代码** —— 注入表总会定义
+ *    `shank_ik_bias_per_mm`，所以 `float(...)` 永远成功。见 `.c` 里的详细说明。
  */
 float servo_map_shank_bias(float l1, float l2, float leg_len_ref);
+
+/** @brief `servo_map_shank_bias()` 用的 per_mm 常量（给测试打印用） */
+float servo_map_shank_bias_per_mm(void);
 
 /**
  * @brief 复刻 `padog.cal_test_shank(x, leg_trim)`：`0.006649x² + 0.4414x + 5.53`
