@@ -18,6 +18,7 @@ import os
 import sys
 import math
 import random
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -724,8 +725,28 @@ def load_padog_ns(tmpdir):
     if str(MPY) not in sys.path:
         sys.path.insert(0, str(MPY))
 
+    # ---- 把 padog.py **exec 进一个真正的模块对象**，并注册成 sys.modules['padog'] ----
+    #
+    # 为什么不能像以前那样 exec 进一个普通 dict：`PA_WALK._apply_cg()` 里有
+    #     import padog
+    #     ...
+    #     padog.gesture(0, int(CG_X), int(yst))
+    # 而 `padog.gesture()` 会**直接改 `PIT_goal` / `ROL_goal` / `X_goal`**，
+    # 且 `cal_w()` 在 mainloop 里的位置**在姿态 slew 环之前** ——
+    # 所以原版是**同一帧**就用了被改过的目标。
+    #
+    # 如果 `sys.modules['padog']` 还是 mpy_stubs 那个空壳（gesture 是 no-op），
+    # 参考值就会**漏掉这个副作用**，WALK 那 32 行全是假的，
+    # 而 C 版会"精确匹配一个原版并不产生的行为"。这和 P-23 是同一类错误：
+    # **参考环境必须是真的。**
+    #
+    # exec 进模块自己的 `__dict__`（而不是替换 `__dict__`，那是只读属性）之后，
+    # `padog.gesture(...)` 改的就是 mainloop 读的那份全局量。
     src = mpy_stubs.load_padog_source(cfg_path)
-    ns = {"__name__": "padog_ref", "__file__": str(MPY / "padog.py")}
+    mod = types.ModuleType("padog")
+    mod.__file__ = str(MPY / "padog.py")
+    sys.modules["padog"] = mod
+    ns = mod.__dict__
     exec(compile(src, "padog.py", "exec"), ns)
 
     # ---- 把 WALK 的 IMU 路径**按硬件事实**固定为"关闭" ----

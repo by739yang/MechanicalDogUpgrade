@@ -174,6 +174,78 @@ RESULT: PASS -- all 264 outputs match exactly
 对负数**向 -∞ 取整**；而 C 的 `/` 是**向 0 截断**。陀螺仪原始值有负数，所以这是真实差异。
 `filter_moving_avg.c` 显式实现了向下取整。
 
+### control_chain ← `padog.py` 的 `mainloop()`（**P3：全链路**）
+
+```
+rows        : 90   (gait0/trot: 58, gait1/walk: 32)
+crawl rows  : 26   (crawl_phase != 0 in the input)
+pairs       : 1080 (12 channels x 90 rows; each pair = ON + OFF)
+exact pairs : 1080 / 1080
+max delta   : 0 duty counts  (allowed 0)
+mismatches  : 0
+
+RESULT: PASS -- all 12 channels match the original mainloop() exactly
+```
+
+**这一套和前面七套的性质不同。** 前面都是"一个模块对一个模块"；这一套对照的是
+**整条控制链**，而且参考值不是我拼出来的 ——
+
+> **把原版 `padog.py` 整个 exec 进来，直接调用它的 `mainloop()`，记录它写出的
+> 12 组占空比。** 每一行都重新 exec 一次 padog.py，所以模块级状态每行都是干净的。
+
+于是那些**从来没被单独测过、也一行没迁过**的东西全进了对照范围：
+
+- **大狗缩放层**：`_geom_scale()`（=1.7987）、`_partial_geom_scale()`（故意不全乘）、
+  `_ik_hc()`（= `R_H + 119`）、以及 6 个 `_LARGE_*` 系数
+- **编排层**：抬腿高度按速度自适应、姿态 `slew` 环（每帧只逼近一步）、
+  按步态模式与摇杆方向**选重心的 5 个分支**
+- **`padog.py` 第 57~81 行那张 59 项的默认值注入表**
+- `_hip_leg_deltas()` / `_apply_trot_swing_y()` / `_foot_y_targets()` /
+  `cal_test_shank()` / `servo_output()`
+
+CSV：15 个输入列（`spd, L, R, gait_mode, t, R_H, H_goal, PIT_S, PIT_goal, ROL_S,
+ROL_goal, X_S, X_goal, joy_turn, crawl_phase`）+ 12 组 (ON, OFF)。
+
+> ⚠️ **`t` 只在 `[0, Ts]` 内取值**。原版 `PA_TROT.cal_t()` 没有 `else` 分支，
+> `t > Ts` 会直接 `UnboundLocalError` —— 那不是原版的可达域（`mainloop` 里
+> `if t >= Ts: t = t - Ts` 先回绕了）。C 版**故意**做了回绕（迁移表 §8.10），
+> 所以喂越界输入等于在测"我自己的改进"，而不是在测等价性。
+
+### ⚠️ 这一套也踩了同一个坑（P-25）
+
+第一版**1080/1080 全绿**，但参考环境是错的：
+`PA_WALK._apply_cg()` 会调 `padog.gesture()` **直接改重心目标**，而参考环境里
+`sys.modules['padog']` 是 `mpy_stubs` 的空壳、`gesture` 是 no-op
+⇒ **副作用被静默吞掉**，C 版于是"精确匹配了一个原版并不产生的行为"，
+而且还把这个错误**写进了注释**当作有意差异。
+
+修法：`load_padog_ns()` 把 `padog.py` **exec 进一个真模块对象并注册为
+`sys.modules['padog']`**。改完重跑，**90 行里 24 行的参考值变了**，
+C 版失败 125 处 —— 修 C 后才重新精确通过。
+
+⇒ 教训：**stub 只对纯函数安全；凡是 stub 掉一个"会被调用"的东西，
+先问它原本会改什么。** 以及：**测试通过之后，要反过来审一遍参考值自己是怎么来的。**
+
+### ✅ 验证验证器：这个测试真的有牙齿吗
+
+对 14 处做过故意破坏（都在临时副本上），**全部 FAIL**：
+
+| 破坏 | 不匹配数 |
+|---|---:|
+| 去掉爬行服务 | 188 |
+| `joy_forward_motion` 取反 | 351 |
+| 去掉 `_apply_trot_swing_y` | 88 |
+| 去掉俯仰限位 | 10 |
+| 去掉站高 slew | 188 |
+| `trot_cg_f` 符号取反 | 264 |
+| `_hip_leg_deltas` 清零 | 234 |
+| `_walk_phase_step` 清零 | 141 |
+| WALK 重心系数 `0.65 → 1.65` | 27 |
+| **不施加 WALK 的 gesture 副作用** | **125** ← 就是 P-25 那个 |
+
+唯一"活下来"的是把 WALK 重心系数从 0.65 微调到 0.66 —— 变化幅度低于占空比的
+量化步长，属于**必然测不出**的（而真正的改动 0.65→1.65 会 FAIL）。
+
 ### servo_map ← PA_SERVO.py + padog.py 的 `servo_output()`（**P2 的映射层**）
 
 ```
@@ -383,9 +455,11 @@ python check_mpy_loadable.py
 | `gait_walk.c` | `PA_WALK.py` | ✅ 通过（7872 项足端 + 2952 项重心整数，最大 6.7e-5 mm） |
 | `app_config.c` | `config.py` / `config_s.py` | ✅ 通过（68 条行为检查；NVS 持久化在真机验证） |
 | `servo_map.c` | `PA_SERVO.py` + `padog.servo_output()` | ✅ 通过（284 + 720 = **1004 项精确相等**） |
+| `control_chain.c` | `padog.py` 的 `mainloop()` | ✅ 通过（**1080 组精确相等**，参考值 = 原版 mainloop 真跑） |
 
-**P2 的映射层已迁移并验证**。舵机的**物理**通道→关节映射与转向
+**P3 的控制链已迁移并全链路验证。** 舵机的**物理**通道→关节映射与转向
 （"ch7 到底是不是右前大腿、正转是抬起还是压下"）只能上机实测，
 见 `../../硬件实物核对清单.md` 阶段 E 与固件的 `lgtest` 命令。
 
-下一步是 **P3：TROT / WALK 步态接进控制链**。
+下一步：把 `app_config` 补齐（注入表里还有 18 个字段没进配置结构体）→
+把 `control_chain` 接进固定周期任务 → 加步态控制台命令。
