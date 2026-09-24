@@ -54,7 +54,7 @@
 | `PA_TROT.py` → `gait_trot.c` | ✅ 8320 项，最大误差 1.9e-5 mm（容差 1 mm） |
 | `PA_WALK.py` → `gait_walk.c` | ✅ 7872 项足端（最大 6.7e-5 mm）+ 2952 项重心整数（**精确相等**） |
 | `PA_AVGFILT.py` → `filter_moving_avg.c` | ✅ 264 项整数**精确相等** |
-| `config.py`/`config_s.py` → `app_config.c` | ✅ 68 条行为检查（默认值/限幅/CRC/版本/环回/空存储/擦除） |
+| `config.py`/`config_s.py` → `app_config.c` | ✅ 108 条行为检查（默认值/注入表默认值/限幅/CRC/版本/环回/空存储/擦除） |
 | NVS 持久化 | ✅ **真机验证**：`cfg set` → `cfg save` → 硬复位 → 值仍在；`cfg reset` 确实擦除 |
 | 配置越界限幅 | ✅ 真机验证（`h_goal 9999` → 250；`ma_case 5` → 1；`arm_upper_board 0x7F` → 0x40） |
 | 合计对照项 | **20 696** 项，全部通过 |
@@ -116,23 +116,43 @@
 - `_hip_leg_deltas()`（髋辅助偏航）、`_apply_trot_swing_y()`（右侧抬腿降 0.80）
 - `_foot_y_targets()`（前后腿竖直偏置）、`cal_test_shank()`、IK、`servo_output()`
 
-### (3) `padog.py` 里有一张 **59 项的默认值注入表**（第 57~81 行）
+### (3) `padog.py` 里有一张 **64 项的默认值注入表**（第 57~81 行）
 
 config 文件里没有的键，全部由这张表兜底。**它才是"出厂默认值"的真正来源**
 （例如 `shank_ik_bias_per_mm = 0.25`、`trot_right_h_mul = 0.80`、
 `walk_speed_scale = 1.4`、`walk_roll_trim = 3`、`shank_ik_bias_deg = 0.0`）。
 
-⇒ **`app_config_t` 目前缺这些字段**（**15 项** —— 这是把 `control_chain_cfg_t`
-与 `app_config_t` 的字段表**逐一 diff** 得出的，不是靠眼看或搜索；
-P3 需要补齐，届时 `APP_CFG_VERSION` 要 +1）：
+⇒ **`app_config_t` 缺的字段：19 项**（✅ 已于 P3 补齐，`APP_CFG_VERSION` 1 → 2，
+`sizeof(app_config_t)` 360 → **448**）。
+
+这个数字**不是眼看或搜索出来的**，方法是：
+
+1. 把真版 `padog.py` exec 一遍；
+2. 再把注入表那句 `for` 整段删掉、重 exec 一遍；
+3. **两次命名空间的名字差集** = 注入表真正提供的键（**24 个** ——
+   `config.py`/`config_s.py` 已定义的键两次都在，自动落选）；
+4. 再与 `control_chain_cfg_t` / `app_config_t` 的字段表映射。
+
+24 个键里 19 个在 C 里没有对应字段：
 
 ```
-shank_ik_bias_per_mm, shank_ik_bias_deg,
-front_leg_y_offset, rear_leg_y_offset,
-leg1_s_trim .. leg4_s_trim            (4 项)
-leg2_z_mul, leg3_z_mul, leg4_z_mul    (3 项)
-walk_speed_scale, walk_roll_trim, trot_roll_trim, trot_right_h_mul
+控制链段 12 个字段：
+  shank_ik_bias_per_mm (0.25), shank_ik_bias_deg (0.0),
+  front_leg_y_offset (0.0), rear_leg_y_offset (0.0),
+  s_trim[4] (0.0 x4)   <- 注入表里 leg1_s_trim..leg4_s_trim 这 4 个键合成一个数组字段
+  leg2_z_mul, leg3_z_mul, leg4_z_mul (1.0),
+  walk_speed_scale (1.4), walk_roll_trim (3.0),
+  trot_roll_trim (0.0), trot_right_h_mul (0.80)
+
+机械臂段 7 个字段（同样是"只存在于注入表"的键，P6 会用到；
+不补就等于把那张注入表半抄）：
+  arm_grip_digital (0), arm_grip_pwm_hz (50),
+  arm_grip_min_us (500), arm_grip_max_us (2500),
+  arm_upper_walk (145), arm_fore_walk (125), arm_walk_rate (0.15)
 ```
+
+> ⚠️ 顺带更正一处文档事实：注入表实际是 **64 项**（第 57 行开始），
+> 不是本文档早先写的 59 项 —— 那个数字是目测估的，按真文件数出来是 64。
 
 > 已经核对过、**不需要改**的：`walk_faai`（我之前怀疑它被凭空填了，
 > 实际注入表里就是 0.30，`app_config.c` 的值是对的 —— 见成长手册 P-24）。

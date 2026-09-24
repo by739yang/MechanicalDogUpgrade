@@ -1,4 +1,4 @@
-# HANDOFF：MechanicalDogUpgrade 代码移植交接文档
+﻿# HANDOFF：MechanicalDogUpgrade 代码移植交接文档
 
 > 更新时间：2026-09-11（正文）／2026-09-19（最新状态见下方）
 > 用途：下一轮新对话开始 ESP-IDF C 版本移植时，先完整阅读本文件，再阅读 `ESP-IDF_C迁移表.md` 和 `micropython/` 下的原始代码。
@@ -55,7 +55,7 @@
    - 5 个纯数学模块（`kinematics` / `body_pose` / `gait_trot` / `gait_walk` /
      `filter_moving_avg`）已从 `PA_*.py` 移植，并与 **MicroPython 原实现逐数值对照**：
      **20 696 项，最大误差 ≤ 6.7e-5**（整数项要求精确相等，全过）。
-   - 配置模块 `app_config.c`：**68 条行为检查**全过（默认值 / 限幅 / CRC / 版本 /
+   - 配置模块 `app_config.c`：**108 条行为检查**全过（默认值 / 限幅 / CRC / 版本 /
      环回 / 空存储 / 擦除）。
    - **NVS 持久化已在真机验证**：`cfg set` → `cfg save` → **硬复位** → 值仍在；
      `cfg reset` 确实擦除并回默认值；越界值在真机上确实被限幅。
@@ -113,7 +113,7 @@
     配置与步态调用之间还有**一整层"大狗缩放层"**（`_geom_scale()` = 268/149 = **1.7987**、
     `_partial_geom_scale()`、`_ik_hc()` = `R_H + 119`、6 个 `_LARGE_*` 系数）、
     **编排层**（抬腿高度按速度自适应、姿态 slew 环、按步态/摇杆选重心的 5 个分支），
-    以及 `padog.py` 第 57~81 行那张 **59 项的默认值注入表**（出厂默认值的真正来源）。
+    以及 `padog.py` 第 57~81 行那张 **64 项的默认值注入表**（出厂默认值的真正来源）。
     这些**一行都没迁过**，也没被任何测试覆盖过。
 21. **`control_chain.{h,c}` 已落地**（纯 C、零 IDF 依赖）：`control_chain_tick()`
     一次调用 ≈ 原版 `mainloop()` 的一帧。`control_chain_cfg_t` 同时容纳

@@ -38,8 +38,16 @@
 extern "C" {
 #endif
 
-/** 当前配置结构版本。**改动结构体就要 +1**，旧版本会被判为不兼容并回落默认值。 */
-#define APP_CFG_VERSION 1u
+/**
+ * 当前配置结构版本。**改动结构体就要 +1**，旧版本会被判为不兼容并回落默认值。
+ *
+ * 历史：
+ *   1 —— 只含 `config.py` / `config_s.py` 派生的字段
+ *   2 —— 补上 padog.py 默认值注入表里那些**只存在于注入表**的键
+ *        （19 个字段，见下面的"padog.py 默认值注入表"两段），
+ *        并因此改变 `sizeof(app_config_t)`（360 → 448 字节）
+ */
+#define APP_CFG_VERSION 2u
 
 /** NVS 里存配置用的键名 */
 #define APP_CFG_NVS_KEY   "appcfg"
@@ -77,7 +85,11 @@ typedef struct {
 /**
  * @brief 全部可配置项。
  *
- * 默认值来自学长的 `config.py` 与 `config_s.py`（**照抄实测值，不重新推导**）。
+ * 默认值来自学长的 `config.py` 与 `config_s.py`（**照抄实测值，不重新推导**），
+ * 外加 `padog.py` 第 57~81 行**默认值注入表**里那些两个 config 文件都没定义的键
+ * （见下面两段"padog.py 默认值注入表"，值一律以 `control_chain_cfg_defaults()` 为准）。
+ * 这些键是**实证**找出来的，不是手写清单：判据是"在真版 padog.py 命名空间里，
+ * 只有注入表提供了它"（成长手册 P-23/P-24 —— 搜索会漏报，求值不会）。
  *
  * ⚠️ 腿部编号与原实现一致：**腿1=左前、腿2=右前、腿3=右后、腿4=左后**。
  *    注意这**不是**按物理顺序排的（3 是右后、4 是左后）—— 原实现如此，不要"整理"。
@@ -137,6 +149,54 @@ typedef struct {
     int32_t joy_fwd_sign; /**< 摇杆前推方向，-1 */
     int32_t cal_leg_sel;  /**< 标定页当前选中腿，1..4 */
 
+    /* ---------- padog.py 默认值注入表：控制链相关 ----------
+     * 下面这些键**只存在于** padog.py 第 57~81 行的默认值注入表里
+     * （`config.py` / `config_s.py` 都没有定义它们），所以"只按 config 文件派生"的
+     * 本结构体一开始漏掉了它们，app 层也就没法把 `control_chain_cfg_t` 填全。
+     *
+     * 默认值与 `control_chain_cfg_defaults()`（control_chain.c）**逐项相等** ——
+     * 那才是这台机器上真正生效的值；`tools/golden/test_app_config.c` 里有一组
+     * 断言直接把两边逐字段对比，不允许凭印象填数（成长手册 P-23/P-24）。
+     */
+    /** 小腿 IK 偏置系数（deg/mm）。注入表 `shank_ik_bias_per_mm = 0.25`
+     *  （⚠️ 不是 `_shank_ik_bias()` 里那个死代码 0.375）。默认值取自
+     *  `control_chain_cfg_defaults()` */
+    float shank_ik_bias_per_mm;
+    /** 小腿 IK 固定偏置（度）。注入表 `shank_ik_bias_deg = 0.0`；
+     *  `>0` 时优先于 per_mm 分支。默认值取自 `control_chain_cfg_defaults()` */
+    float shank_ik_bias_deg;
+    /** 前腿足端竖直偏置（mm）。注入表 `front_leg_y_offset = 0.0`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    float front_leg_y_offset;
+    /** 后腿足端竖直偏置（mm）。注入表 `rear_leg_y_offset = 0.0`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    float rear_leg_y_offset;
+    /** 每条腿的小腿微调 `leg1_s_trim`..`leg4_s_trim`（度），索引 0..3 = 腿1..腿4。
+     *  注入表全 0.0。默认值取自 `control_chain_cfg_defaults()` */
+    float s_trim[APP_CFG_LEGS];
+    /** `leg2_z_mul`（注入表 1.0）。控制链的数学路径目前不读它，搬过来只为
+     *  不把注入表"抄一半"。默认值取自 `control_chain_cfg_defaults()` */
+    float leg2_z_mul;
+    /** `leg3_z_mul`（注入表 1.0）。默认值取自 `control_chain_cfg_defaults()` */
+    float leg3_z_mul;
+    /** `leg4_z_mul`（注入表 1.0）。注入表里**没有** `leg1_z_mul`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    float leg4_z_mul;
+    /** WALK 相位增量倍率。注入表 `walk_speed_scale = 1.4`；
+     *  `<=0.05` 时 control_chain 退回 1.0（= 用自动算出来的步频）。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    float walk_speed_scale;
+    /** 直行 WALK 滚转微调（度）。注入表 `walk_roll_trim = 3`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    float walk_roll_trim;
+    /** 直行 TROT 滚转微调（度）。注入表 `trot_roll_trim = 0`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    float trot_roll_trim;
+    /** 右侧两条腿（腿2/腿3）摆动抬腿高度倍率。注入表 `trot_right_h_mul = 0.80`；
+     *  `>=0.999` 时 control_chain 整段跳过。默认值取自
+     *  `control_chain_cfg_defaults()` */
+    float trot_right_h_mul;
+
     /* ---------- 机械臂 ---------- */
     float arm_upper_init; /**< 大臂中位，145 */
     float arm_fore_init;  /**< 小臂中位，125 */
@@ -155,6 +215,32 @@ typedef struct {
     int32_t arm_fore_board;  /**< 0x40 */
     int32_t arm_grip_board;  /**< 0x41 */
     int32_t arm_grip_gpio;   /**< -1 = 走 PCA9685；>=0 = 用该 GPIO 的 PWM */
+
+    /* ---------- padog.py 默认值注入表：机械臂侧 ----------
+     * 同样是**只存在于注入表**（`config_s.py` 没定义的）7 个键。搬过来是为了
+     * `control_chain_cfg_t` 的机械臂段也能被如实填满；默认值与
+     * `control_chain_cfg_defaults()` 逐项相等。 */
+    /** 夹爪是否用数字电平驱动。注入表 `arm_grip_digital = 0`（0 = 走 PWM）。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    int32_t arm_grip_digital;
+    /** 夹爪 PWM 频率（Hz）。注入表 `arm_grip_pwm_hz = 50`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    int32_t arm_grip_pwm_hz;
+    /** 夹爪 PWM 最小脉宽（微秒）。注入表 `arm_grip_min_us = 500`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    int32_t arm_grip_min_us;
+    /** 夹爪 PWM 最大脉宽（微秒）。注入表 `arm_grip_max_us = 2500`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    int32_t arm_grip_max_us;
+    /** WALK 时大臂角（度）。注入表 `arm_upper_walk = 145`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    int32_t arm_upper_walk;
+    /** WALK 时小臂角（度）。注入表 `arm_fore_walk = 125`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    int32_t arm_fore_walk;
+    /** WALK 时机械臂摆动速率。注入表 `arm_walk_rate = 0.15`。
+     *  默认值取自 `control_chain_cfg_defaults()` */
+    float arm_walk_rate;
 
     /* ---------- WiFi（纯 AP 模式） ---------- */
     /**

@@ -15,6 +15,14 @@
  *
  * 注意：`config_s.py` 的 `faai=0.42` **覆盖**了 `config.py` 的 `0.5`（padog 先 exec
  * config.py 再 exec config_s.py），所以默认 TROT 占空比取 **0.42**。
+ *
+ * 除了两个 config 文件，默认值还有第二个来源：`padog.py` 第 57~81 行的
+ * **默认值注入表**（`if _hk not in _g: _g[_hk] = _hd`）。那张表里有 64 个键，
+ * 其中 **24 个**两个 config 文件都没定义 —— 那些键就是原版真正的出厂默认值。
+ * 本文件里 `shank_ik_bias_*` / `*_leg_y_offset` / `s_trim` / `leg*_z_mul` /
+ * `walk_speed_scale` / `*_roll_trim` / `trot_right_h_mul` 与 7 个 `arm_*` 共
+ * 19 个字段就来自那里；值一律与 `control_chain_cfg_defaults()` 保持一致，
+ * 并由 `tools/golden/test_app_config.c` 逐字段断言（不靠人眼对照）。
  */
 
 #include "app/app_config.h"
@@ -92,6 +100,26 @@ void app_config_defaults(app_config_t *cfg)
     cfg->joy_fwd_sign = -1;
     cfg->cal_leg_sel  = 2;
 
+    /* ---------- padog.py 默认值注入表：控制链相关 ----------
+     * config.py / config_s.py 里**没有**这些键，原版靠 padog.py 第 57~81 行的
+     * 注入表兜底，所以这些值就是这台机器的出厂默认。取值一律照抄
+     * `control_chain_cfg_defaults()`（同一个仓库、同一份注入表），不在这里另算一份。
+     */
+    cfg->shank_ik_bias_per_mm = 0.25f;   /* 不是 _shank_ik_bias() 里的死代码 0.375 */
+    cfg->shank_ik_bias_deg    = 0.0f;
+    cfg->front_leg_y_offset   = 0.0f;
+    cfg->rear_leg_y_offset    = 0.0f;
+    for (int i = 0; i < APP_CFG_LEGS; ++i) {
+        cfg->s_trim[i] = 0.0f;           /* leg1_s_trim .. leg4_s_trim */
+    }
+    cfg->leg2_z_mul       = 1.0f;        /* 注入表里没有 leg1_z_mul */
+    cfg->leg3_z_mul       = 1.0f;
+    cfg->leg4_z_mul       = 1.0f;
+    cfg->walk_speed_scale = 1.4f;
+    cfg->walk_roll_trim   = 3.0f;
+    cfg->trot_roll_trim   = 0.0f;
+    cfg->trot_right_h_mul = 0.80f;
+
     /* 机械臂 */
     cfg->arm_upper_init  = 145.0f;
     cfg->arm_fore_init   = 125.0f;
@@ -110,6 +138,15 @@ void app_config_defaults(app_config_t *cfg)
     cfg->arm_fore_board  = 0x40;
     cfg->arm_grip_board  = 0x41;
     cfg->arm_grip_gpio   = -1;   /* -1 = 走 PCA9685 */
+
+    /* 机械臂：只存在于 padog.py 注入表的 7 个键 */
+    cfg->arm_grip_digital = 0;
+    cfg->arm_grip_pwm_hz  = 50;
+    cfg->arm_grip_min_us  = 500;
+    cfg->arm_grip_max_us  = 2500;
+    cfg->arm_upper_walk   = 145;
+    cfg->arm_fore_walk    = 125;
+    cfg->arm_walk_rate    = 0.15f;
 
     /* WiFi：纯 AP 模式，默认凭据是**通用占位值**，不是学长的真实热点凭据 */
     strncpy(cfg->ap_ssid, "RobotDog", sizeof(cfg->ap_ssid) - 1);
@@ -240,6 +277,50 @@ int app_config_validate(app_config_t *cfg, int *changed, char *msg, size_t msg_l
     clamp_f(&cfg->walk_h, 0.0f, 200.0f, "walk_h", changed, msg, msg_len);
     clamp_f(&cfg->walk_speed, 0.0f, 1.0f, "walk_speed", changed, msg, msg_len);
 
+    /* ---------- padog.py 注入表：控制链相关 ----------
+     * 限幅原则（成长手册"宁可限幅也不要让链子悄悄跑飞"）：
+     *   - 每一项都给一个"再大/再小就明显是配错了"的界，界内完全不动（不干扰正常调参）；
+     *   - 不做"按别的字段动态限幅"的花活（唯一例外见下面 arm_grip_min/max 的交换），
+     *     免得用户把某个基准调小之后，默认值反被无声改掉。
+     * 这里**只管量纲上的荒谬值**（负的系数、几百毫米的足端偏置、几十度的偏置角），
+     * 不做"物理可达性"判断 —— 那是 IK 限幅层的事。
+     */
+    /* 小腿偏置系数：负值会把偏置反号，>2 deg/mm 会让小腿角随腿长暴走 */
+    clamp_f(&cfg->shank_ik_bias_per_mm, 0.0f, 2.0f, "shank_ik_bias_per_mm",
+            changed, msg, msg_len);
+    /* 小腿固定角偏置：±45° 之外小腿角已无意义（默认 0） */
+    clamp_f(&cfg->shank_ik_bias_deg, -45.0f, 45.0f, "shank_ik_bias_deg",
+            changed, msg, msg_len);
+    /* 足端竖直偏置（mm）：小腿+大腿共 268 mm，±100 mm 之内还算"偏置" */
+    clamp_f(&cfg->front_leg_y_offset, -100.0f, 100.0f, "front_leg_y_offset",
+            changed, msg, msg_len);
+    clamp_f(&cfg->rear_leg_y_offset, -100.0f, 100.0f, "rear_leg_y_offset",
+            changed, msg, msg_len);
+    /* 小腿角微调：±45° 之外等于把小腿指到别的象限 */
+    for (int leg = 0; leg < APP_CFG_LEGS; ++leg) {
+        char nm[32];
+        snprintf(nm, sizeof(nm), "leg%d_s_trim", leg + 1);
+        clamp_f(&cfg->s_trim[leg], -45.0f, 45.0f, nm, changed, msg, msg_len);
+    }
+    /* z 缩放系数：0 或负值会让几何塌陷/翻转（控制链当前不读，但将来要接） */
+    clamp_f(&cfg->leg2_z_mul, 0.1f, 5.0f, "leg2_z_mul", changed, msg, msg_len);
+    clamp_f(&cfg->leg3_z_mul, 0.1f, 5.0f, "leg3_z_mul", changed, msg, msg_len);
+    clamp_f(&cfg->leg4_z_mul, 0.1f, 5.0f, "leg4_z_mul", changed, msg, msg_len);
+    /* 下限刻意放 0：`<=0.05` 在 control_chain 里表示"不覆盖"（退回 1.0），
+     * 夹到 0.05 会把"自动"这个语义改成"恰好停在阈值上" */
+    clamp_f(&cfg->walk_speed_scale, 0.0f, 5.0f, "walk_speed_scale",
+            changed, msg, msg_len);
+    /* 滚转微调直接叠加到姿态上（不再过 pit/rol 限位），±45° 已远超"微调"；
+     * 不按 rol_max_ang 限 —— 那会在用户把 rol_max_ang 调小时把默认的 3° 一起夹掉 */
+    clamp_f(&cfg->walk_roll_trim, -45.0f, 45.0f, "walk_roll_trim",
+            changed, msg, msg_len);
+    clamp_f(&cfg->trot_roll_trim, -45.0f, 45.0f, "trot_roll_trim",
+            changed, msg, msg_len);
+    /* 它只用来"把右侧抬腿压低"，>=0.999 即视为关闭；所以 0..1 才是它的语义区间，
+     * 超过 1 会把要修的问题反过来（右腿比左腿还高） */
+    clamp_f(&cfg->trot_right_h_mul, 0.0f, 1.0f, "trot_right_h_mul",
+            changed, msg, msg_len);
+
     /* 髋辅助 */
     clamp_f(&cfg->hip_k_roll, -5.0f, 5.0f, "hip_k_roll", changed, msg, msg_len);
     clamp_f(&cfg->hip_k_pitch, -5.0f, 5.0f, "hip_k_pitch", changed, msg, msg_len);
@@ -291,6 +372,26 @@ int app_config_validate(app_config_t *cfg, int *changed, char *msg, size_t msg_l
             note_change(bnames[i], changed, msg, msg_len);
         }
     }
+
+    /* 机械臂：只存在于 padog.py 注入表的 7 个键 */
+    clamp_i(&cfg->arm_grip_digital, 0, 1, "arm_grip_digital", changed, msg, msg_len);
+    clamp_i(&cfg->arm_grip_pwm_hz, 1, 1000, "arm_grip_pwm_hz", changed, msg, msg_len);
+    /* 脉宽 0 会让定时器算不出占空比；20000 us 已超过 50 Hz 的一整个周期 */
+    clamp_i(&cfg->arm_grip_min_us, 1, 20000, "arm_grip_min_us", changed, msg, msg_len);
+    clamp_i(&cfg->arm_grip_max_us, 1, 20000, "arm_grip_max_us", changed, msg, msg_len);
+    if (cfg->arm_grip_min_us > cfg->arm_grip_max_us) {
+        const int32_t t = cfg->arm_grip_min_us;
+        cfg->arm_grip_min_us = cfg->arm_grip_max_us;
+        cfg->arm_grip_max_us = t;
+        note_change("arm_grip_min>max swapped", changed, msg, msg_len);
+    }
+    /* WALK 姿态角按大/小臂自己的 min..max 夹（与 arm_upper_init / arm_fore_init 同规矩） */
+    clamp_i(&cfg->arm_upper_walk, (int32_t)cfg->arm_upper_min, (int32_t)cfg->arm_upper_max,
+            "arm_upper_walk", changed, msg, msg_len);
+    clamp_i(&cfg->arm_fore_walk, (int32_t)cfg->arm_fore_min, (int32_t)cfg->arm_fore_max,
+            "arm_fore_walk", changed, msg, msg_len);
+    /* 与 arm_upper_rate / arm_fore_rate 同一区间 */
+    clamp_f(&cfg->arm_walk_rate, 0.01f, 90.0f, "arm_walk_rate", changed, msg, msg_len);
 
     /* WiFi：保证 NUL 结尾并夹长度 */
     cfg->ap_ssid[sizeof(cfg->ap_ssid) - 1] = '\0';

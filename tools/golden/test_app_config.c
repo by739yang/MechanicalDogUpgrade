@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "app/app_config.h"
+#include "control/control_chain.h"
 
 /* ==========================================================================
  * RAM 假后端
@@ -151,6 +152,82 @@ static void t_defaults(void)
     printf("  checks=%d fail=%d\n", g_checks, g_fail);
 }
 
+/*
+ * padog.py 第 57~81 行那张默认值注入表里，有 24 个键是 `config.py` / `config_s.py`
+ * **都没有定义**的（判据是实证：在真版 padog.py 命名空间里把注入表整段去掉再 exec
+ * 一次，两次命名空间的名字差集就是它）。其中 19 个键对应 `control_chain_cfg_t`
+ * 的 19 个字段，而老版 `app_config_t` 一个都没有（成长手册 P-24：结论要靠求值，
+ * 不能靠搜索）。
+ *
+ * 这一组就是本次补字段的验收点，**两层**都要过：
+ *   [A] app_config_t 的默认值 == `control_chain_cfg_defaults()` 的同名字段
+ *       —— 防止两边各自跑偏；
+ *   [B] 再对若干"有区分度"的值断言**字面量** —— 防止两边一起错在同一个地方
+ *       （P-23 就是参考值和 C 版一起把 0.375 当成了真值，测试全绿却都是错的）。
+ */
+static void t_injection_defaults(void)
+{
+    SECTION("padog.py injection-table defaults == control_chain_cfg_defaults()");
+    app_config_t c;
+    control_chain_cfg_t k;
+    app_config_defaults(&c);
+    control_chain_cfg_defaults(&k);
+
+    /* ---- [A] 逐字段相等 ---- */
+    check(feq(c.shank_ik_bias_per_mm, k.shank_ik_bias_per_mm)
+          && feq(c.shank_ik_bias_deg, k.shank_ik_bias_deg),
+          "shank_ik_bias_* == control_chain");
+    check(feq(c.front_leg_y_offset, k.front_leg_y_offset)
+          && feq(c.rear_leg_y_offset, k.rear_leg_y_offset),
+          "front/rear_leg_y_offset == control_chain");
+    check(feq(c.s_trim[0], k.s_trim[0]) && feq(c.s_trim[1], k.s_trim[1])
+          && feq(c.s_trim[2], k.s_trim[2]) && feq(c.s_trim[3], k.s_trim[3]),
+          "s_trim[0..3] == control_chain");
+    check(feq(c.leg2_z_mul, k.leg2_z_mul) && feq(c.leg3_z_mul, k.leg3_z_mul)
+          && feq(c.leg4_z_mul, k.leg4_z_mul),
+          "leg2/3/4_z_mul == control_chain");
+    check(feq(c.walk_speed_scale, k.walk_speed_scale), "walk_speed_scale == control_chain");
+    check(feq(c.walk_roll_trim, k.walk_roll_trim), "walk_roll_trim == control_chain");
+    check(feq(c.trot_roll_trim, k.trot_roll_trim), "trot_roll_trim == control_chain");
+    check(feq(c.trot_right_h_mul, k.trot_right_h_mul), "trot_right_h_mul == control_chain");
+
+    check(c.arm_grip_digital == k.arm_grip_digital, "arm_grip_digital == control_chain");
+    check(c.arm_grip_pwm_hz == k.arm_grip_pwm_hz, "arm_grip_pwm_hz == control_chain");
+    check(c.arm_grip_min_us == k.arm_grip_min_us, "arm_grip_min_us == control_chain");
+    check(c.arm_grip_max_us == k.arm_grip_max_us, "arm_grip_max_us == control_chain");
+    check(c.arm_upper_walk == k.arm_upper_walk, "arm_upper_walk == control_chain");
+    check(c.arm_fore_walk == k.arm_fore_walk, "arm_fore_walk == control_chain");
+    check(feq(c.arm_walk_rate, k.arm_walk_rate), "arm_walk_rate == control_chain");
+
+    /* ---- [B] 字面量（值 = 真版 padog.py 注入表里的那个数） ---- */
+    SECTION("injection-table literal values (independent second source)");
+    check(feq(c.shank_ik_bias_per_mm, 0.25f),
+          "shank_ik_bias_per_mm = 0.25 (NOT the dead 0.375 -- see journal P-23)");
+    check(feq(c.shank_ik_bias_deg, 0.0f), "shank_ik_bias_deg = 0.0");
+    check(feq(c.front_leg_y_offset, 0.0f) && feq(c.rear_leg_y_offset, 0.0f),
+          "front/rear_leg_y_offset = 0.0");
+    check(feq(c.s_trim[0], 0.0f) && feq(c.s_trim[1], 0.0f)
+          && feq(c.s_trim[2], 0.0f) && feq(c.s_trim[3], 0.0f), "leg*_s_trim = 0.0");
+    check(feq(c.leg2_z_mul, 1.0f) && feq(c.leg3_z_mul, 1.0f) && feq(c.leg4_z_mul, 1.0f),
+          "leg2/3/4_z_mul = 1.0");
+    check(feq(c.walk_speed_scale, 1.4f), "walk_speed_scale = 1.4");
+    check(feq(c.walk_roll_trim, 3.0f), "walk_roll_trim = 3");
+    check(feq(c.trot_roll_trim, 0.0f), "trot_roll_trim = 0");
+    check(feq(c.trot_right_h_mul, 0.80f), "trot_right_h_mul = 0.80");
+    check(c.arm_grip_digital == 0, "arm_grip_digital = 0");
+    check(c.arm_grip_pwm_hz == 50, "arm_grip_pwm_hz = 50");
+    check(c.arm_grip_min_us == 500 && c.arm_grip_max_us == 2500,
+          "arm_grip pulse width = 500..2500 us");
+    check(c.arm_upper_walk == 145 && c.arm_fore_walk == 125, "arm walk pose = 145/125");
+    check(feq(c.arm_walk_rate, 0.15f), "arm_walk_rate = 0.15");
+
+    /* 版本号必须因为结构体变化而升到 2（旧 blob 会被判为不兼容 -> 回落默认值） */
+    check(APP_CFG_VERSION == 2u, "APP_CFG_VERSION bumped to 2 for the new fields");
+    check(c.version == 2u, "defaults stamp version 2");
+
+    printf("  checks=%d fail=%d\n", g_checks, g_fail);
+}
+
 static void t_validate(void)
 {
     SECTION("validate clamps out-of-range values");
@@ -170,6 +247,18 @@ static void t_validate(void)
     c.ap_password[0] = 'x';           /* 太短 */
     c.ap_password[1] = '\0';
     strcpy(c.ap_ssid, "");            /* 空 SSID */
+
+    /* 新增（只存在于注入表的）字段：同样要有限幅 */
+    c.shank_ik_bias_per_mm = -1.0f;   /* < 0 */
+    c.shank_ik_bias_deg = 200.0f;     /* > 45 */
+    c.s_trim[2] = 999.0f;             /* > 45 */
+    c.leg3_z_mul = 0.0f;              /* < 0.1 */
+    c.walk_speed_scale = 99.0f;       /* > 5 */
+    c.trot_right_h_mul = 3.0f;        /* > 1 */
+    c.arm_grip_pwm_hz = 0;            /* < 1 */
+    c.arm_grip_min_us = 9000;         /* min/max 反了 -> 应被交换 */
+    c.arm_grip_max_us = 100;
+    c.arm_upper_walk = 999;           /* > arm_upper_max */
 
     int changed = 0;
     char msg[128];
@@ -191,6 +280,18 @@ static void t_validate(void)
     check(c.arm_grip_gpio == -1, "arm_grip_gpio clamped to -1");
     check(strlen(c.ap_password) >= 8, "short AP password replaced");
     check(strcmp(c.ap_ssid, "RobotDog") == 0, "empty SSID replaced");
+
+    check(feq(c.shank_ik_bias_per_mm, 0.0f), "shank_ik_bias_per_mm clamped to 0");
+    check(feq(c.shank_ik_bias_deg, 45.0f), "shank_ik_bias_deg clamped to 45");
+    check(feq(c.s_trim[2], 45.0f), "leg3_s_trim clamped to 45");
+    check(feq(c.leg3_z_mul, 0.1f), "leg3_z_mul clamped to 0.1");
+    check(feq(c.walk_speed_scale, 5.0f), "walk_speed_scale clamped to 5");
+    check(feq(c.trot_right_h_mul, 1.0f), "trot_right_h_mul clamped to 1");
+    check(c.arm_grip_pwm_hz == 1, "arm_grip_pwm_hz clamped to 1");
+    check(c.arm_grip_min_us == 100 && c.arm_grip_max_us == 9000,
+          "grip pulse width min/max swapped when inverted");
+    check(c.arm_upper_walk == (int32_t)c.arm_upper_max,
+          "arm_upper_walk clamped to arm_upper_max");
 
     /* in_pit/in_rol 依赖 pit_max_ang，限幅后不应超出 */
     c.in_pit = 999.0f;
@@ -320,6 +421,7 @@ int main(void)
     printf("========================================================\n");
 
     t_defaults();
+    t_injection_defaults();
     t_validate();
     t_roundtrip();
     t_missing();

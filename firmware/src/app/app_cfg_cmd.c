@@ -87,6 +87,23 @@ static const cfg_field_t kFields[] = {
     { "walk_faai",  CT_F32, OFF(walk_faai), 0 },
     { "walk_h",     CT_F32, OFF(walk_h), 0 },
     { "walk_speed", CT_F32, OFF(walk_speed), 0 },
+    /* ---- padog.py 默认值注入表：控制链相关（config 文件里没有这些键） ----
+     * 名字与 padog.py 注入表里的键名一致，方便和原版逐行对着读。 */
+    { "shank_ik_bias_per_mm", CT_F32, OFF(shank_ik_bias_per_mm), 0 },
+    { "shank_ik_bias_deg",    CT_F32, OFF(shank_ik_bias_deg), 0 },
+    { "front_leg_y_offset",   CT_F32, OFF(front_leg_y_offset), 0 },
+    { "rear_leg_y_offset",    CT_F32, OFF(rear_leg_y_offset), 0 },
+    { "leg1_s_trim", CT_F32, OFF(s_trim[0]), 0 },
+    { "leg2_s_trim", CT_F32, OFF(s_trim[1]), 0 },
+    { "leg3_s_trim", CT_F32, OFF(s_trim[2]), 0 },
+    { "leg4_s_trim", CT_F32, OFF(s_trim[3]), 0 },
+    { "leg2_z_mul", CT_F32, OFF(leg2_z_mul), 0 },
+    { "leg3_z_mul", CT_F32, OFF(leg3_z_mul), 0 },
+    { "leg4_z_mul", CT_F32, OFF(leg4_z_mul), 0 },
+    { "walk_speed_scale", CT_F32, OFF(walk_speed_scale), 0 },
+    { "walk_roll_trim",   CT_F32, OFF(walk_roll_trim), 0 },
+    { "trot_roll_trim",   CT_F32, OFF(trot_roll_trim), 0 },
+    { "trot_right_h_mul", CT_F32, OFF(trot_right_h_mul), 0 },
     /* ---- 髋辅助 ---- */
     { "hip_k_roll",    CT_F32, OFF(hip_k_roll), 0 },
     { "hip_k_pitch",   CT_F32, OFF(hip_k_pitch), 0 },
@@ -114,6 +131,14 @@ static const cfg_field_t kFields[] = {
     { "arm_fore_board",  CT_I32, OFF(arm_fore_board), 0 },
     { "arm_grip_board",  CT_I32, OFF(arm_grip_board), 0 },
     { "arm_grip_gpio",   CT_I32, OFF(arm_grip_gpio), 0 },
+    /* 同上：只存在于 padog.py 注入表的机械臂键 */
+    { "arm_grip_digital", CT_I32, OFF(arm_grip_digital), 0 },
+    { "arm_grip_pwm_hz",  CT_I32, OFF(arm_grip_pwm_hz), 0 },
+    { "arm_grip_min_us",  CT_I32, OFF(arm_grip_min_us), 0 },
+    { "arm_grip_max_us",  CT_I32, OFF(arm_grip_max_us), 0 },
+    { "arm_upper_walk",   CT_I32, OFF(arm_upper_walk), 0 },
+    { "arm_fore_walk",    CT_I32, OFF(arm_fore_walk), 0 },
+    { "arm_walk_rate",    CT_F32, OFF(arm_walk_rate), 0 },
     /* ---- WiFi（纯 AP） ---- */
     { "ap_ssid",     CT_STR, OFF(ap_ssid),     sizeof(s_cfg.ap_ssid) },
     { "ap_password", CT_STR, OFF(ap_password), sizeof(s_cfg.ap_password) },

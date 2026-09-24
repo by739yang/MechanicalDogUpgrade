@@ -59,10 +59,22 @@ if errorlevel 1 goto :err
 rem app_config has no golden CSV: it is a check-based test that injects a RAM
 rem storage backend, so defaults / clamping / CRC / version / round trip are all
 rem verified on the PC without a board.
+rem
+rem control_chain.c is linked in on purpose: the injection-table defaults have to be
+rem compared field-by-field against control_chain_cfg_defaults(), i.e. against the
+rem function that the app layer will actually fill control_chain_cfg_t from. It is
+rem pure C, but it calls the five control/ math modules, so they come along.
 gcc -O2 -Wall -Wextra -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_app_config.exe ^
-    test_app_config.c "..\..\firmware\src\app\app_config.c"
+    test_app_config.c ^
+    "..\..\firmware\src\app\app_config.c" ^
+    "..\..\firmware\src\control\control_chain.c" ^
+    "..\..\firmware\src\control\kinematics.c" ^
+    "..\..\firmware\src\control\body_pose.c" ^
+    "..\..\firmware\src\control\gait_trot.c" ^
+    "..\..\firmware\src\control\gait_walk.c" ^
+    "..\..\firmware\src\control\servo_map.c" -lm
 if errorlevel 1 goto :err
 
 gcc -O2 -Wall -Wextra -std=c11 ^

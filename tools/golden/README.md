@@ -199,7 +199,7 @@ RESULT: PASS -- all 12 channels match the original mainloop() exactly
   `_ik_hc()`（= `R_H + 119`）、以及 6 个 `_LARGE_*` 系数
 - **编排层**：抬腿高度按速度自适应、姿态 `slew` 环（每帧只逼近一步）、
   按步态模式与摇杆方向**选重心的 5 个分支**
-- **`padog.py` 第 57~81 行那张 59 项的默认值注入表**
+- **`padog.py` 第 57~81 行那张 64 项的默认值注入表**
 - `_hip_leg_deltas()` / `_apply_trot_swing_y()` / `_foot_y_targets()` /
   `cal_test_shank()` / `servo_output()`
 
@@ -273,7 +273,7 @@ RESULT: PASS -- all angle/duty/PWM values match the MicroPython reference
 | 关节角 → 12 路舵机角 | **exec 真版 `padog.py`**（`load_padog_ns()`），调它自己的 `servo_output()` |
 
 > ⚠️ **第一版不是这样，而且错了。** 最初用 `ast` 把函数"抠"出来、手工拼一个命名空间 ——
-> 结果把 `padog.py` 第 57~81 行那张**59 项的默认值注入表**一起丢掉了，
+> 结果把 `padog.py` 第 57~81 行那张**64 项的默认值注入表**一起丢掉了，
 > 于是参考值和 C 版**都把小腿曲线偏置算成 0.375，真值是 0.25**，
 > 测试全绿却都是错的。详见成长手册 **P-23**。
 > 现在 `hip`（来自真版 `_hip_leg_deltas()`）与 `cs`（来自真版
@@ -324,10 +324,10 @@ RESULT: FAIL
 
 ```
 implementation : app_config.c   (纯 C，不依赖 ESP-IDF)
-sizeof(app_config_t) = 360 bytes
-checks         : 68   failures: 0
+sizeof(app_config_t) = 448 bytes   (v2；v1 是 360)
+checks         : 108  failures: 0
 
-RESULT: PASS -- all 68 checks passed
+RESULT: PASS -- all 108 checks passed
 ```
 
 配置模块和前五个不同：它**不是一个数学函数**，而是一个结构体 + 校验规则 + 持久化。
@@ -336,12 +336,35 @@ RESULT: PASS -- all 68 checks passed
 | 检查组 | 内容 |
 |---|---|
 | defaults | 每一项默认值都与 `config.py` / `config_s.py` 的实测值一致（30 项） |
+| **注入表默认值** | 只存在于 `padog.py` 注入表里的 19 个字段，默认值必须等于 `control_chain_cfg_defaults()`（31 项，见下） |
 | validate | 越界值被限幅到合法区间，且能报出改了哪一项（`changed=11`） |
 | round trip | `save` → `load` 后逐字段相等，CRC 一致 |
 | no saved config | 空存储 → 用默认值 + 返回 `NOENT`（不是报错崩溃） |
 | corrupted CRC | 人为改坏一个字节 → 拒绝载入 + 报 CRC 错，用默认值 |
 | version mismatch | 版本号对不上 → 拒绝载入 + 报版本错，用默认值 |
 | reset | 擦除 + 回默认值 |
+
+#### ⭐ 那 31 项"注入表默认值"检查为什么分**两层**
+
+`app_config_t` 里有一批字段的默认值**不来自 config 文件**，而来自
+`padog.py` 第 57~81 行那张 64 项的注入表（`shank_ik_bias_per_mm = 0.25`、
+`trot_right_h_mul = 0.80`、`walk_speed_scale = 1.4` …）。这些默认值现在
+**两份**存在于代码里：`app_config_defaults()` 与 `control_chain_cfg_defaults()`。
+
+只断言"两者相等"是**不够的** —— 如果哪天两边一起改错（比如都写成 0.375），
+断言依然全绿。**这正是 P-23 的形状**：参考值和被测代码犯同一个错。
+
+所以分两层：
+
+- **[A] 交叉断言**：逐字段 `app_config_defaults()` == `control_chain_cfg_defaults()`
+  （真的把 `control_chain.c` 连同它依赖的 5 个数学模块链进这个测试，不是抄数值）
+- **[B] 字面量断言**：再对 14 组值断言**硬编码的字面量**
+  （0.25 / 1.4 / 3 / 0.80 / 500..2500 …）
+  ⇒ [B] **不依赖** `control_chain.c`，是**独立的第二个来源**
+
+**做过破坏性验证**：把 `shank_ik_bias_per_mm` 改回 P-23 那个错值 0.375，
+立刻 `failures=2` 且退出码 1 —— 而且失败的两条**一条来自 [A]、一条来自 [B]**，
+证明两层都真的在工作。
 
 **怎么做到不用板子**：持久化后端是通过**函数指针表** `app_cfg_store_t` 注入的，
 所以宿主机上塞一个 RAM 假后端就行，配置逻辑本身零 IDF 依赖。
@@ -387,7 +410,7 @@ RESULT: FAIL -- 101 of 264 outputs differ
 > **应该立刻 FAIL。** 如果改坏了它还 PASS，那才是真问题。
 
 **结论**：五个数学模块都与 MicroPython 参考**数值等价**（整数滤波器为精确相等），
-配置模块的 68 条行为检查全部通过，舵机映射层 1004 项**精确相等**。
+配置模块的 108 条行为检查全部通过，舵机映射层 1004 项**精确相等**。
 残余误差量级 8e-6 ~ 6e-5，纯粹是 C `float` 与 Python `double` 的舍入差
 （固件刻意用 `float`：ESP32 只有单精度硬件 FPU，`double` 是软件模拟，慢一两个数量级）。
 舵机映射层之所以能做到**零误差**，是因为它的输入在两侧都是"已经算好的数"，
@@ -453,7 +476,7 @@ python check_mpy_loadable.py
 | `gait_trot.c` | `PA_TROT.py` | ✅ 通过（8320 项，最大 1.9e-5 mm） |
 | `filter_moving_avg.c` | `PA_AVGFILT.py` | ✅ 通过（264 项，整数精确相等） |
 | `gait_walk.c` | `PA_WALK.py` | ✅ 通过（7872 项足端 + 2952 项重心整数，最大 6.7e-5 mm） |
-| `app_config.c` | `config.py` / `config_s.py` | ✅ 通过（68 条行为检查；NVS 持久化在真机验证） |
+| `app_config.c` | `config.py` / `config_s.py` | ✅ 通过（108 条行为检查；NVS 持久化在真机验证） |
 | `servo_map.c` | `PA_SERVO.py` + `padog.servo_output()` | ✅ 通过（284 + 720 = **1004 项精确相等**） |
 | `control_chain.c` | `padog.py` 的 `mainloop()` | ✅ 通过（**1080 组精确相等**，参考值 = 原版 mainloop 真跑） |
 
