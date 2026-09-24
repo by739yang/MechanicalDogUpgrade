@@ -97,6 +97,22 @@ gcc -O2 -Wall -Wextra -std=c11 ^
     "..\..\firmware\src\control\servo_map.c" -lm
 if errorlevel 1 goto :err
 
+rem 多帧序列：把 mainloop() 连跑几百帧，逐帧对照。这条专门覆盖单帧对照
+rem 结构上看不见的东西 —— 跨帧延续、命令语义（move/gait/height/gesture）、长时漂移。
+rem 命令脚本从 CSV 读，不在测试里硬编码，避免"同一份脚本两个副本"漂移。
+gcc -O2 -Wall -Wextra -std=c11 ^
+    -I"..\..\firmware\src" ^
+    -o build\test_control_chain_cmd.exe ^
+    test_control_chain_cmd.c ^
+    "..\..\firmware\src\control\control_chain_cmd.c" ^
+    "..\..\firmware\src\control\control_chain.c" ^
+    "..\..\firmware\src\control\kinematics.c" ^
+    "..\..\firmware\src\control\body_pose.c" ^
+    "..\..\firmware\src\control\gait_trot.c" ^
+    "..\..\firmware\src\control\gait_walk.c" ^
+    "..\..\firmware\src\control\servo_map.c" -lm
+if errorlevel 1 goto :err
+
 echo.
 echo [4/4] run
 build\test_kinematics.exe golden\ik.csv
@@ -121,6 +137,9 @@ build\test_servo_map.exe golden\servo_angle.csv golden\servo_output.csv
 if errorlevel 1 set FAILED=1
 echo.
 build\test_control_chain.exe golden\control_chain.csv
+if errorlevel 1 set FAILED=1
+echo.
+build\test_control_chain_cmd.exe golden\control_chain_seq.csv golden\control_chain_seq_cmds.csv
 if errorlevel 1 set FAILED=1
 
 echo.

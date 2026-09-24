@@ -904,6 +904,134 @@ def control_chain_cases(n_random=90, seed=20260919):
     return cases
 
 
+# ============================================================================
+#  P3: 多帧序列对照 (control_chain_cmd.c)
+# ============================================================================
+#
+# 单帧对照（control_chain.csv）每行都是"干净初值 + 跑一帧"，所以**结构上**测不出：
+#   1. 跨帧延续（相位 t、姿态 slew、四个目标是否被保留）；
+#   2. 命令语义（move()/gait() 到底重置了哪些量）；
+#   3. 长时间漂移。
+#
+# 这一套把原版 `mainloop()` **连续跑 N 次**，中间按脚本调用原版的
+# `move()` / `gait()` / `height()` / `gesture()` / `set_joy_turn()`
+# （就是网页摇杆会调的那几个），逐帧记录 12 组占空比。
+
+#: 序列脚本：每条 = (帧号, 函数名, 参数元组)
+CHAIN_SEQ_SCRIPTS = {
+    # 1) 站立 20 帧 → TROT 前进 120 帧 → 加转向 40 帧 → 回直行 20 帧 → 停 20 帧
+    1: [
+        (0, "move", (0.0, 0, 0)),
+        (20, "move", (-3.0, 1, 1)),
+        (140, "set_joy_turn", (100.0,)),
+        (180, "set_joy_turn", (0.0,)),
+        (200, "move", (0.0, 0, 0)),
+    ],
+    # 2) WALK 前进 80 帧 → 后退 40 帧 → 停 20 帧
+    #    （WALK 的 cal_w 会通过 padog.gesture() 改重心目标 —— 专门验跨帧保留）
+    2: [
+        (0, "gait", (1,)),
+        (0, "move", (-2.0, 1, 1)),
+        (80, "move", (2.0, 1, 1)),
+        (120, "move", (0.0, 0, 0)),
+    ],
+    # 3) 行进中反复 move()：验"模式没变就不重置相位"（原版 move 里 gait(0) 的行为）
+    3: [
+        (0, "move", (-3.0, 1, 1)),
+        (15, "move", (-3.5, 1, 1)),
+        (30, "move", (-4.0, 1, 1)),
+        (45, "move", (-3.0, 1, 1)),
+        (60, "move", (-2.0, 1, 1)),
+    ],
+    # 4) 高度与姿态命令：验 height() / gesture() 对目标的作用
+    4: [
+        (0, "move", (0.0, 0, 0)),
+        (10, "height", (60.0,)),
+        (40, "gesture", (5.0, -4.0, 30.0)),
+        (80, "height", (81.0,)),
+        (110, "gesture", (0.0, 0.0, 18.0)),
+    ],
+    # 5) TROT ↔ WALK 切换：验"模式变了才 t=0"
+    5: [
+        (0, "move", (-3.0, 1, 1)),
+        (40, "gait", (1,)),
+        (100, "gait", (0,)),
+        (160, "move", (0.0, 0, 0)),
+    ],
+}
+
+#: 每个序列跑多少帧
+CHAIN_SEQ_FRAMES = {1: 240, 2: 140, 3: 100, 4: 140, 5: 200}
+
+
+#: 动作编号（写进命令 CSV，C 侧按同一张表解释）
+CHAIN_SEQ_ACTION_CODES = {
+    "move": 0,
+    "gait": 1,
+    "height": 2,
+    "gesture": 3,
+    "set_joy_turn": 4,
+}
+
+
+def gen_control_chain_seq(fh, tmpdir):
+    """
+    多帧序列：每行 = 一帧。
+
+    CSV 列：`seq, frame,` 然后 12 组 (ON, OFF)。
+
+    命令**不写进这个 CSV**，而是另写一份 `control_chain_seq_cmds.csv`
+    （`seq, frame, action, a0, a1, a2`），C 侧测试**从文件读**。
+    ⇒ 之所以不把脚本硬编码在 C 测试里：那就成了"同一份脚本两个副本"，
+    两边一漂移就会产生假 FAIL 或假 PASS（成长手册 P-22 那一类）。
+    """
+    LOGICAL = [(0x40, 0), (0x40, 1), (0x40, 2), (0x40, 3), (0x40, 4), (0x40, 5),
+               (0x41, 0), (0x41, 1), (0x41, 2), (0x41, 3), (0x41, 4), (0x41, 5)]
+
+    rows = 0
+    cmd_rows = 0
+    with open(OUT / "control_chain_seq_cmds.csv", "w", encoding="utf-8", newline="\n") as cfh:
+        for seq_id in sorted(CHAIN_SEQ_SCRIPTS):
+            script = CHAIN_SEQ_SCRIPTS[seq_id]
+            n_frames = CHAIN_SEQ_FRAMES[seq_id]
+
+            ns = load_padog_ns(tmpdir)
+            rec = sys.modules["PA_SERVO"]._i2c_servo
+
+            by_frame = {}
+            for (fr, fn, args) in script:
+                by_frame.setdefault(fr, []).append((fn, args))
+                if fn not in CHAIN_SEQ_ACTION_CODES:
+                    raise SystemExit("脚本里出现未知动作: %s" % fn)
+                a = list(args) + [0.0, 0.0, 0.0]
+                cfh.write("%d,%d,%d,%g,%g,%g\n" % (
+                    seq_id, fr, CHAIN_SEQ_ACTION_CODES[fn], a[0], a[1], a[2]))
+                cmd_rows += 1
+
+            for fr in range(n_frames):
+                for (fn, args) in by_frame.get(fr, []):
+                    ns[fn](*args)
+
+                rec.clear()
+                ns["mainloop"]()
+                writes = {(a, ch): (on, off) for (a, ch, on, off) in rec.led_writes()}
+                if len(writes) != 12:
+                    raise SystemExit("seq %d 帧 %d：期望 12 路，实际 %d 路"
+                                     % (seq_id, fr, len(writes)))
+                fields = [seq_id, fr]
+                for key in LOGICAL:
+                    on, off = writes[key]
+                    fields += [on, off]
+                fh.write(",".join(str(v) for v in fields) + "\n")
+                rows += 1
+
+            print("  seq %d: %d 帧（%d 条命令）" % (seq_id, n_frames, len(script)))
+
+    print("  control_chain_seq golden 行数: %d 帧，命令 %d 条"
+          "（参考值 = 原版 mainloop 连跑）" % (rows, cmd_rows))
+    return rows
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -958,11 +1086,15 @@ def main():
         with open(OUT / "servo_output.csv", "w", encoding="utf-8", newline="\n") as fh:
             total += gen_servo_output(fh, servo_output_cases(), tmpdir)
 
-        print("\n[8/8] padog.mainloop() -> control_chain.c（全链路，P3）...")
+        print("\n[8/9] padog.mainloop() -> control_chain.c（全链路，单帧，P3）...")
         with open(OUT / "control_chain.csv", "w", encoding="utf-8", newline="\n") as fh:
             total += gen_control_chain(fh, control_chain_cases(), tmpdir)
 
-    print("\n完成。共 8 个 suite, %d 行。" % total)
+        print("\n[9/9] padog.mainloop() 连跑 -> control_chain_cmd.c（多帧序列，P3）...")
+        with open(OUT / "control_chain_seq.csv", "w", encoding="utf-8", newline="\n") as fh:
+            total += gen_control_chain_seq(fh, tmpdir)
+
+    print("\n完成。共 9 个 suite, %d 行。" % total)
     print("提示：这些 CSV 要提交进仓库，C 版测试只读它们。")
 
 

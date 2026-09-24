@@ -90,15 +90,24 @@ esp_err_t app_chain_reload_cfg(void);
 /** @brief 设置链的调用周期（毫秒）。1..1000。默认 `APP_CHAIN_DEFAULT_PERIOD_MS` */
 esp_err_t app_chain_set_period_ms(uint32_t ms);
 
+/** @brief 当前链节拍（毫秒） */
+uint32_t app_chain_get_period_ms(void);
+
+/** @brief 高度命令（复刻 `padog.height()`：同时改 `H_goal` 与 `R_H`，绕开 slew） */
+esp_err_t app_chain_set_height(float h_goal);
+
 /** @brief 选择步态：0 = TROT，1 = WALK */
 esp_err_t app_chain_set_gait(int gait_mode);
 
 /**
  * @brief 行走命令：`L`/`R` 是左右腿相位系数（-1/0/1），`spd` 是速度量。
  *
- * @note 语义与原版 `padog.move(spd, L, R)` 一致：`spd=0` 或 `L+R=0` 且 `spd=0` 时
- *       原地不动（但姿态目标保持，狗就**站着**）。**"停止走路"不等于"松力"** ——
- *       松力是 `motion stop` / `estop` 的事。
+ * @note 语义与原版 `padog.move(spd, L, R)` **完全一致**（由被多帧 golden
+ *       验证过的 `control_chain_cmd_move()` 实现）。注意两个容易误解的点：
+ *       - `L=R=0` 或 `spd=0` 时**只改** spd/L/R，**不动**目标与相位
+ *         ⇒ `jog 0 0 0` = "站着不动"，狗会保持姿态；
+ *       - 行进中再次 `move()`（网页摇杆每次动作都会调）**不会重置相位**
+ *         （原版 `gait(0)` 只在模式真的变了时才 `t=0`）。
  */
 esp_err_t app_chain_jog(float spd, int L, int R);
 
