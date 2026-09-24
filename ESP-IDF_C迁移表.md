@@ -122,28 +122,48 @@ config 文件里没有的键，全部由这张表兜底。**它才是"出厂默�
 （例如 `shank_ik_bias_per_mm = 0.25`、`trot_right_h_mul = 0.80`、
 `walk_speed_scale = 1.4`、`walk_roll_trim = 3`、`shank_ik_bias_deg = 0.0`）。
 
-⇒ **`app_config_t` 目前缺这些字段**（共 18 项，P3 需要补齐，届时
-`APP_CFG_VERSION` 要 +1）：
+⇒ **`app_config_t` 目前缺这些字段**（**15 项** —— 这是把 `control_chain_cfg_t`
+与 `app_config_t` 的字段表**逐一 diff** 得出的，不是靠眼看或搜索；
+P3 需要补齐，届时 `APP_CFG_VERSION` 要 +1）：
 
 ```
 shank_ik_bias_per_mm, shank_ik_bias_deg,
 front_leg_y_offset, rear_leg_y_offset,
-leg1_s_trim .. leg4_s_trim, leg2_z_mul .. leg4_z_mul,
+leg1_s_trim .. leg4_s_trim            (4 项)
+leg2_z_mul, leg3_z_mul, leg4_z_mul    (3 项)
 walk_speed_scale, walk_roll_trim, trot_roll_trim, trot_right_h_mul
 ```
 
 > 已经核对过、**不需要改**的：`walk_faai`（我之前怀疑它被凭空填了，
 > 实际注入表里就是 0.30，`app_config.c` 的值是对的 —— 见成长手册 P-24）。
+>
+> `_LARGE_*`（6 个）、`HIP_TURN_DEAD` / `HIP_TURN_STICK_SCALE` / `TURN_HIP_GAIN`、
+> `CRAWL_*`（5 个）**不是配置项** —— 原版里它们本来就是模块级常量
+> （padog.py 153~155、170~174、243~248）。C 版保持为编译期常量，只是放在
+> `control_chain_cfg_t` 里便于整体传递，**不要**把它们做成可配的。
 
-### (4) 全链路对照已建立（不用板子）
+### (4) 全链路对照 ✅ 已建立并全过（不用板子）
 
 `tools/golden/` 新增第 8 套：**把原版 `padog.py` 整个 exec 进来、直接调用
 `mainloop()`**，逐行记录它写出的 12 组占空比，与 C 版 `control_chain.c` 对照。
 ⇒ 连上面 (1)(2)(3) 这些"从没测过的东西"一起进了对照范围。
 ⇒ 90 行输入覆盖：站立 / 原地踏步 / 前进 / 后退 / 转弯 / WALK / 爬行 /
    姿态 slew 未到位 / 超限限位。
+⇒ **结果：1080/1080 组占空比精确相等**（零容差）。
 ⇒ **`t` 只在 `[0, Ts]` 内取值** —— 原版 `cal_t()` 没有 else，`t > Ts` 会崩，
    那不是原版的可达域（详见成长手册 P-19）。
+
+⚠️ **这一套第一次全绿时参考值其实是错的**（成长手册 **P-25**）：
+参考环境里 `sys.modules['padog']` 是 stub，`PA_WALK._apply_cg()` 调的
+`padog.gesture()` 是 no-op ⇒ **跨模块副作用被静默吞掉**，C 版于是"精确匹配了
+一个原版并不产生的行为"。修正参考环境后 **90 行里 24 行变了**，C 版失败 125 处。
+⇒ 结论：**stub 只对纯函数安全；凡是 stub 掉一个"会被调用"的东西，
+先问它原本会改什么。**
+
+⚠️ 还有一个**单帧对照的固有盲区**：原版那四个目标（`H_goal`/`PIT_goal`/
+`ROL_goal`/`X_goal`）是**模块级全局，改一次会一直留着**，而 C 版设计成"每帧输入"。
+⇒ `control_chain_out_t` 里加了 `goal[4]`，**app 层必须把它作为下一帧输入喂回来**；
+golden 是逐行单帧对照，**结构上测不出这个差别**，只能靠接口文档约束。
 
 
 ## 1. 当前 MicroPython 控制链
