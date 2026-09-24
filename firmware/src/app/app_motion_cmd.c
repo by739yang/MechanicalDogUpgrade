@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "app/app_chain.h"
 #include "app/app_cfg_cmd.h"
 #include "app/motion.h"
 #include "app/servo_out.h"
@@ -30,9 +31,15 @@ void app_motion_cmd_help(void)
     ESP_LOGI(TAG, "  motion start|stop            启动/停止固定周期控制任务");
     ESP_LOGI(TAG, "  motion stat                  周期/抖动/写次数/目标与当前角度");
     ESP_LOGI(TAG, "  motion period <ms>           控制周期（默认 10 = 100 Hz）");
-    ESP_LOGI(TAG, "  motion rate <deg_per_s>      速率上限（默认 120）");
+    ESP_LOGI(TAG, "  motion rate <deg_per_s>      速率上限（默认 120，仅 POSE 模式）");
     ESP_LOGI(TAG, "  motion timeout <ms>          命令超时后松力停车（默认 10000，0=关闭）");
-    ESP_LOGI(TAG, "  stand                        目标设为直接站姿（限速走过去）");
+    ESP_LOGI(TAG, "  motion mode pose|chain       控制模式：直接 12 路角度 / 走控制链");
+    ESP_LOGI(TAG, "  stand                        站姿（走控制链 = 原版真正的站姿）");
+    ESP_LOGI(TAG, "  stand direct                 标定用站姿（12 路 = 中位角，见 E8）");
+    ESP_LOGI(TAG, "  gait trot|walk               选步态（chain 模式）");
+    ESP_LOGI(TAG, "  jog <spd> <L> <R>            行走命令，如 jog -3 1 1（前进）");
+    ESP_LOGI(TAG, "  turn <pct>                   横杆转向百分比（|pct|>=10 才生效）");
+    ESP_LOGI(TAG, "  chain                        打印控制链状态（相位/目标/角度）");
     ESP_LOGI(TAG, "  estop [reason]               急停：12 路松力并停任务");
     ESP_LOGI(TAG, "  lg <ch 0..11> <deg>          直接设某逻辑通道角度（须先 motion stop）");
     ESP_LOGI(TAG, "  lg off                       12 路全部无脉冲（松力）");
@@ -95,8 +102,18 @@ static void cmd_motion(const char *args)
         return;
     }
 
-    if (strcmp(sub, "period") == 0 || strcmp(sub, "rate") == 0 || strcmp(sub, "timeout") == 0) {
-        const int v = atoi(rest);
+    if (strcmp(sub, "mode") == 0) {
+        if (strcmp(rest, "chain") == 0) {
+            ESP_LOGI(TAG, "motion mode chain -> %s", esp_err_to_name(motion_set_mode(MOTION_MODE_CHAIN)));
+        } else if (strcmp(rest, "pose") == 0) {
+            ESP_LOGI(TAG, "motion mode pose -> %s", esp_err_to_name(motion_set_mode(MOTION_MODE_POSE)));
+        } else {
+            ESP_LOGE(TAG, "用法: motion mode pose|chain");
+        }
+        return;
+    }
+
+    if (strcmp(sub, "period") == 0 || strcmp(sub, "rate") == 0 || strcmp(sub, "timeout") == 0) {        const int v = atoi(rest);
         esp_err_t err;
         if (strcmp(sub, "period") == 0) {
             err = motion_set_period_ms((uint32_t)v);
@@ -128,23 +145,114 @@ static void cmd_motion(const char *args)
  * stand / estop
  * ========================================================================== */
 
-static void cmd_stand(void)
+static void cmd_stand(const char *args)
 {
-    const esp_err_t err = motion_set_target_stand();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "设置站姿失败: %s", esp_err_to_name(err));
-        return;
+    if (strcmp(args, "direct") == 0) {
+        /* 标定用站姿：12 路 = 中位角（= 原版 servo_output 的 else 分支）。
+         * ⚠️ 与原版正常站姿**不是同一个姿态**，见核对清单 E8。 */
+        motion_set_mode(MOTION_MODE_POSE);
+        const esp_err_t err = motion_set_target_stand();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "设置站姿失败: %s", esp_err_to_name(err));
+            return;
+        }
+        ESP_LOGW(TAG, "标定用站姿（12 路 = 中位角）—— 这不是原版正常站立的样子");
+    } else {
+        /* 原版真正的站姿：走完整控制链（cal_ges -> IK -> servo_output） */
+        const esp_err_t err = motion_set_mode(MOTION_MODE_CHAIN);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "切换 CHAIN 模式失败: %s", esp_err_to_name(err));
+            return;
+        }
+        app_chain_stand();
+        ESP_LOGI(TAG, "站立命令已下发（走控制链 = 原版真正的站姿）");
+    }
+
+    if (!motion_is_running()) {
+        ESP_LOGW(TAG, "控制任务没在跑 —— `motion start` 后才会动");
     }
 
     motion_stats_t st;
     motion_get_stats(&st);
-    ESP_LOGI(TAG, "站姿目标已下发（12 路 = 中位角）。当前角度：");
     for (uint8_t ch = 0; ch < SERVO_MAP_CHANNELS; ++ch) {
         ESP_LOGI(TAG, "  ch%-2u %-10s 目标=%7.2f", (unsigned)ch,
                  servo_map_channel_name(ch), (double)st.target[ch]);
     }
-    if (!motion_is_running()) {
-        ESP_LOGW(TAG, "控制任务没在跑 —— 目标已记下，`motion start` 后才会动");
+}
+
+static void cmd_gait(const char *args)
+{
+    int g = -1;
+    if (strcmp(args, "trot") == 0) {
+        g = 0;
+    } else if (strcmp(args, "walk") == 0) {
+        g = 1;
+    } else if (args[0] != '\0') {
+        g = atoi(args);
+    }
+    if (g < 0 || g > 1) {
+        ESP_LOGE(TAG, "用法: gait trot|walk");
+        return;
+    }
+    const esp_err_t err = app_chain_set_gait(g);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "设置步态失败: %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "步态 = %s（相位 t 已归零）", (g == 0) ? "TROT" : "WALK");
+}
+
+static void cmd_jog(const char *args)
+{
+    float spd = 0.0f;
+    int L = 0, R = 0;
+    const int n = sscanf(args, "%f %d %d", &spd, &L, &R);
+    if (n < 1) {
+        ESP_LOGE(TAG, "用法: jog <spd> [L] [R]   例: jog -3 1 1（前进）");
+        return;
+    }
+    /* 原版 `move()`：只要有方向且有速度就切回 TROT 并把相位归零 */
+    const esp_err_t err = app_chain_jog(spd, L, R);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "jog 失败: %s", esp_err_to_name(err));
+        return;
+    }
+    if (motion_get_mode() != MOTION_MODE_CHAIN) {
+        ESP_LOGW(TAG, "当前是 POSE 模式 —— 请先 `motion mode chain`，否则命令不生效");
+    }
+    ESP_LOGI(TAG, "jog: spd=%.3f L=%d R=%d", (double)spd, L, R);
+}
+
+static void cmd_turn(const char *args)
+{
+    const float pct = strtof(args, NULL);
+    const esp_err_t err = app_chain_set_joy_turn(pct);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "turn 失败: %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "转向 = %.1f%%（|pct| >= 10 时髋角才参与）", (double)pct);
+}
+
+static void cmd_chain(void)
+{
+    app_chain_status_t cs;
+    app_chain_get_status(&cs);
+
+    ESP_LOGI(TAG, "控制链: 模式=%s 有效=%s 链帧=%u 节拍=%u ms",
+             (motion_get_mode() == MOTION_MODE_CHAIN) ? "CHAIN" : "POSE",
+             cs.valid ? "是" : "否", (unsigned)cs.frames, (unsigned)cs.period_ms);
+    ESP_LOGI(TAG, "命令: gait=%s spd=%.3f L=%d R=%d 转向=%.1f%%",
+             (cs.gait_mode == 0) ? "TROT" : "WALK", (double)cs.spd, cs.L, cs.R,
+             (double)cs.joy_turn);
+    ESP_LOGI(TAG, "目标: H=%.2f PIT=%.2f ROL=%.2f X=%.2f",
+             (double)cs.goal[0], (double)cs.goal[1], (double)cs.goal[2], (double)cs.goal[3]);
+    ESP_LOGI(TAG, "状态: t=%.4f R_H=%.2f PIT_S=%.2f ROL_S=%.2f X_S=%.2f",
+             (double)cs.t, (double)cs.R_H, (double)cs.PIT_S, (double)cs.ROL_S, (double)cs.X_S);
+    for (uint8_t ch = 0; ch < SERVO_MAP_CHANNELS; ++ch) {
+        ESP_LOGI(TAG, "  ch%-2u %-10s 角度=%7.2f 占空比=%u", (unsigned)ch,
+                 servo_map_channel_name(ch), (double)cs.angle_deg[ch],
+                 (unsigned)servo_map_deg_to_duty(cs.angle_deg[ch]));
     }
 }
 
@@ -328,7 +436,15 @@ void app_motion_cmd_handle(const char *cmd, const char *args)
     if (strcmp(cmd, "motion") == 0) {
         cmd_motion(args);
     } else if (strcmp(cmd, "stand") == 0) {
-        cmd_stand();
+        cmd_stand(args);
+    } else if (strcmp(cmd, "gait") == 0) {
+        cmd_gait(args);
+    } else if (strcmp(cmd, "jog") == 0) {
+        cmd_jog(args);
+    } else if (strcmp(cmd, "turn") == 0) {
+        cmd_turn(args);
+    } else if (strcmp(cmd, "chain") == 0) {
+        cmd_chain();
     } else if (strcmp(cmd, "estop") == 0) {
         cmd_estop(args);
     } else if (strcmp(cmd, "lg") == 0) {
@@ -350,6 +466,13 @@ void app_motion_cmd_init(void)
         ESP_LOGE(TAG, "运动模块初始化失败");
         return;
     }
+    /* 控制链的应用层封装。必须在 app_cfg_cmd_init() 之后（要读配置）。 */
+    if (app_chain_init() != ESP_OK) {
+        ESP_LOGE(TAG, "控制链初始化失败");
+        return;
+    }
+    /* 默认 POSE 模式：上电不会自己走 */
+    (void)motion_set_mode(MOTION_MODE_POSE);
 
     /* 上电自检阶段就把 12 路确认成"无脉冲"，并且**不**自动启动控制任务 */
     const esp_err_t err = servo_out_all_off();
@@ -359,8 +482,13 @@ void app_motion_cmd_init(void)
 
     motion_stats_t st;
     motion_get_stats(&st);
-    ESP_LOGI(TAG, "P2 就绪：12 路无脉冲（舵机松力），控制任务未启动");
-    ESP_LOGI(TAG, "  默认: 周期 %.0f ms / 速率 %.0f °/s / 超时 %u ms；"
-                  "`stand` + `motion start` 开始站立测试",
+    app_chain_status_t cs;
+    app_chain_get_status(&cs);
+    ESP_LOGI(TAG, "P2/P3 就绪：12 路无脉冲（舵机松力），控制任务未启动，模式 POSE");
+    ESP_LOGI(TAG, "  运动任务: 周期 %.0f ms / 速率 %.0f °/s / 超时 %u ms",
              (double)st.period_ms, (double)st.rate_dps, (unsigned)st.timeout_ms);
+    ESP_LOGI(TAG, "  控制链:   节拍 %u ms（原版 ~65 ms 主循环的等价物，见迁移表 §8.11）",
+             (unsigned)cs.period_ms);
+    ESP_LOGI(TAG, "  站立: `stand` + `motion start`（走控制链，原版真正的站姿）");
+    ESP_LOGI(TAG, "  走路: `motion mode chain` + `gait trot` + `jog -3 1 1` + `motion start`");
 }

@@ -8,6 +8,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "app/app_chain.h"
 #include "app/app_cfg_cmd.h"
 #include "app/servo_out.h"
 #include "bsp/bsp_i2c.h"
@@ -42,6 +43,7 @@ static motion_state_t s_state;
 static uint32_t s_period_ms  = MOTION_DEFAULT_PERIOD_MS;
 static float    s_rate_dps   = MOTION_DEFAULT_RATE_DPS;
 static uint32_t s_timeout_ms = MOTION_DEFAULT_TIMEOUT_MS;
+static uint32_t s_mode       = MOTION_MODE_POSE;
 
 /* 统计（任务写、控制台读，用 s_mutex 保护） */
 static motion_stats_t s_stats;
@@ -53,6 +55,27 @@ static void stats_reset(void)
     s_stats.period_ms     = (float)s_period_ms;
     s_stats.rate_dps      = s_rate_dps;
     s_stats.timeout_ms    = s_timeout_ms;
+    s_stats.mode          = s_mode;
+}
+
+esp_err_t motion_set_mode(uint32_t mode)
+{
+    if (mode != MOTION_MODE_POSE && mode != MOTION_MODE_CHAIN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_mode = mode;
+    if (s_mutex != NULL && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        s_stats.mode = mode;
+        xSemaphoreGive(s_mutex);
+    }
+    ESP_LOGI(TAG, "控制模式 = %s", (mode == MOTION_MODE_CHAIN) ? "CHAIN（控制链/步态）"
+                                                              : "POSE（直接 12 路角度）");
+    return ESP_OK;
+}
+
+uint32_t motion_get_mode(void)
+{
+    return s_mode;
 }
 
 const char *motion_stop_reason_str(uint32_t reason)
@@ -89,6 +112,17 @@ esp_err_t motion_set_target(const float deg[SERVO_MAP_CHANNELS])
     }
     if (s_mutex == NULL) {
         return ESP_ERR_INVALID_STATE;
+    }
+
+    /* "直接给 12 路角度"本身就是 POSE 语义 —— 隐式切回 POSE，避免
+     * 在 CHAIN 模式下设了目标却看不到任何效果那种**静默无效**。 */
+    if (s_mode != MOTION_MODE_POSE) {
+        ESP_LOGW(TAG, "收到直接角度目标，控制模式自动从 CHAIN 切回 POSE");
+        s_mode = MOTION_MODE_POSE;
+        if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            s_stats.mode = s_mode;
+            xSemaphoreGive(s_mutex);
+        }
     }
 
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -251,14 +285,16 @@ static void log_stats_line(void)
     motion_get_stats(&st);
 
     ESP_LOGI(TAG,
-             "统计: ticks=%u 周期 us(avg/max)=%lld/%lld 抖动max=%lld us 干活 us(avg/max)=%lld/%lld "
-             "超期=%u I2C写=%u 已到位=%s",
+             "统计: ticks=%u 模式=%s 周期 us(avg/max)=%lld/%lld 抖动max=%lld us "
+             "干活 us(avg/max)=%lld/%lld 超期=%u I2C写=%u 链帧=%u 已到位=%s",
              (unsigned)st.ticks,
+             (st.mode == MOTION_MODE_CHAIN) ? "CHAIN" : "POSE",
              (long long)st.period_avg_us, (long long)st.period_max_us,
              (long long)st.jitter_max_us,
              (long long)st.work_avg_us, (long long)st.work_max_us,
              (unsigned)st.overruns,
-             (unsigned)st.i2c_writes, st.settled ? "是" : "否");
+             (unsigned)st.i2c_writes, (unsigned)st.chain_frames,
+             st.settled ? "是" : "否");
 }
 
 static void motion_task(void *arg)
@@ -322,7 +358,7 @@ static void motion_task(void *arg)
             }
         }
 
-        /* ---- 3. 一帧限速推进 ---- */
+        /* ---- 3. 一帧限速推进 / 控制链推进 ---- */
         const int64_t now_us = esp_timer_get_time();
         int64_t       dt_us  = now_us - last_us;   /* 距上一帧开始的整周期 */
         last_us = now_us;
@@ -336,20 +372,39 @@ static void motion_task(void *arg)
         }
         const float max_step = s_rate_dps * ((float)dt_us / 1000000.0f);
 
-        bool settled = true;
-        if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
-            if (s_state.target_valid) {
-                settled = step_towards(s_state.current, s_state.target, max_step);
+        float snapshot[SERVO_MAP_CHANNELS];
+        bool  settled = true;
+
+        if (s_mode == MOTION_MODE_CHAIN) {
+            /*
+             * CHAIN：角度由控制链给。`app_chain_step()` 内部按自己的节拍
+             * （默认 65 ms）推进；没到节拍时它把上一帧的角度原样还回来，
+             * 而 `servo_out` 只写变化的通道 ⇒ 这些重复帧的 I2C 开销是 0。
+             *
+             * ⚠️ 这里**刻意不做速率限制** —— 步态轨迹是被 golden 逐位验证过的，
+             * 限速就改了轨迹。见 motion.h 的 MOTION_MODE_CHAIN 说明。
+             */
+            const bool advanced = app_chain_step(now_us / 1000, snapshot);
+            if (advanced) {
+                if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+                    ++s_stats.chain_frames;
+                    xSemaphoreGive(s_mutex);
+                }
             }
-            xSemaphoreGive(s_mutex);
+            settled = true;   /* 链模式下没有"是否到位"这个概念 */
+        } else {
+            if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+                if (s_state.target_valid) {
+                    settled = step_towards(s_state.current, s_state.target, max_step);
+                }
+                memcpy(snapshot, s_state.current, sizeof(snapshot));
+                xSemaphoreGive(s_mutex);
+            } else {
+                memset(snapshot, 0, sizeof(snapshot));
+            }
         }
 
         /* ---- 4. 输出（servo_out 内部只写变化的通道） ---- */
-        float snapshot[SERVO_MAP_CHANNELS];
-        if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
-            memcpy(snapshot, s_state.current, sizeof(snapshot));
-            xSemaphoreGive(s_mutex);
-        }
         const esp_err_t err = servo_out_apply_deg(snapshot);
         if (err != ESP_OK) {
             /* 单通道写失败已在 servo_out 里记日志，这里不中断控制循环 */

@@ -51,11 +51,42 @@ extern "C" {
 /** 周期性统计日志的间隔（毫秒） */
 #define MOTION_STATS_LOG_MS        10000u
 
+/**
+ * @name 控制模式
+ * @{
+ */
+
+/**
+ * POSE：目标就是**12 路角度本身**（P2 的做法），按速率上限逐步逼近。
+ *
+ * 用于标定与单通道测试（`stand direct` / `lg` / `lgtest`）。
+ * 它对应的正是原版 `servo_output()` 的 **else 分支**（12 路 = 中位角），
+ * 也就是**标定用站姿** —— **不是**狗正常站着的样子（见核对清单 E8）。
+ */
+#define MOTION_MODE_POSE   0u
+
+/**
+ * CHAIN：每帧调 `control_chain_tick()`（= 原版 `mainloop()` 的一帧），
+ * 角度由 `app_chain` 提供。
+ *
+ * ⚠️ **这条路径不加速率限制** —— 步态轨迹本身就是被 golden 逐位验证过的东西，
+ * 再限速就等于改了轨迹、与原版不等价。安全靠别的手段：命令级 `spd` 范围、
+ * `estop`、超时停车、停止时松力。
+ *
+ * ⚠️ 链有自己的节拍（默认 65 ms，见 `app_chain.h` 的推导），
+ * 不是每个运动周期都推进。
+ */
+#define MOTION_MODE_CHAIN  1u
+
+/** @} */
+
 /** 周期统计快照 */
 typedef struct {
     bool     running;          /**< 任务是否在跑 */
     bool     estopped;         /**< 是否因为急停而停止 */
-    bool     settled;          /**< 12 路是否都已到达目标 */
+    bool     settled;          /**< 12 路是否都已到达目标（CHAIN 模式下恒为 true） */
+    uint32_t mode;             /**< `MOTION_MODE_POSE` 或 `MOTION_MODE_CHAIN` */
+    uint32_t chain_frames;     /**< CHAIN 模式下链实际推进的帧数 */
     uint32_t ticks;            /**< 循环次数 */
     uint32_t overruns;         /**< 实测周期超过标称周期的次数 */
     int64_t  period_last_us;   /**< 最近一次实测周期 */
@@ -132,6 +163,18 @@ void motion_get_stats(motion_stats_t *out);
 
 /** @brief 设置控制周期（毫秒）。1..1000。**下一个控制周期即生效**，无需重启任务。 */
 esp_err_t motion_set_period_ms(uint32_t ms);
+
+/**
+ * @brief 切换控制模式：`MOTION_MODE_POSE` 或 `MOTION_MODE_CHAIN`。
+ *
+ * @note 运行中切换是允许的：下一个控制周期就按新模式走。
+ * @note `motion_set_target()` 会把模式**隐式切回 POSE** ——
+ *       "直接给 12 路角度"本身就是 POSE 语义。
+ */
+esp_err_t motion_set_mode(uint32_t mode);
+
+/** @brief 当前控制模式 */
+uint32_t motion_get_mode(void);
 
 /** @brief 设置速率上限（度/秒）。1..2000。 */
 esp_err_t motion_set_rate_dps(float dps);

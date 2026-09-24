@@ -12,6 +12,8 @@
 #include "app/app_p0.h"
 #include "app/app_cfg_cmd.h"
 #include "app/app_motion_cmd.h"
+#include "app/motion.h"
+#include "app/servo_out.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -487,16 +489,33 @@ static void handle_line(char *line)
         cmd_status();
     } else if (strcmp(cmd, "freq") == 0) {
         cmd_freq(args);
-    } else if (strcmp(cmd, "set") == 0) {
-        cmd_set(args);
-    } else if (strcmp(cmd, "deg") == 0) {
-        cmd_deg(args);
-    } else if (strcmp(cmd, "all") == 0) {
-        cmd_all(args);
-    } else if (strcmp(cmd, "off") == 0) {
-        cmd_off(args);
-    } else if (strcmp(cmd, "sweep") == 0) {
-        cmd_sweep(args);
+    } else if (strcmp(cmd, "set") == 0 || strcmp(cmd, "deg") == 0 ||
+               strcmp(cmd, "all") == 0 || strcmp(cmd, "off") == 0 ||
+               strcmp(cmd, "sweep") == 0) {
+        /*
+         * ⚠️ 这五个命令**绕过 `servo_out` 直接写寄存器**，所以必须服从
+         * "运动任务在跑时只有一个写者"这条不变式（migration table §8.5）：
+         *   - 两个任务交错写同一条 I2C 会写坏寄存器；
+         *   - 更要紧的是 `servo_out` 的**占空比缓存会失真** —— 它以为通道还是旧值，
+         *     于是"只写变化的通道"就永远不写，命令看起来生效了、实际被下一帧忽略。
+         * （P2 只挡住了 `lg`/`lgtest`，漏了这五个，P3 补上。）
+         */
+        if (motion_is_running()) {
+            ESP_LOGE(TAG, "'%s' 会绕过 servo_out 直接写寄存器，而控制任务正在运行 —— "
+                          "请先 `motion stop` 或 `estop`", cmd);
+        } else if (strcmp(cmd, "set") == 0) {
+            cmd_set(args);
+        } else if (strcmp(cmd, "deg") == 0) {
+            cmd_deg(args);
+        } else if (strcmp(cmd, "all") == 0) {
+            cmd_all(args);
+        } else if (strcmp(cmd, "off") == 0) {
+            cmd_off(args);
+        } else {
+            cmd_sweep(args);
+        }
+        /* 这些命令改动的是真实硬件状态，缓存必须失效（下一次 servo_out 会全量重写） */
+        servo_out_invalidate();
     } else if (strcmp(cmd, "raw") == 0) {
         cmd_raw(args);
     } else if (strcmp(cmd, "cfg") == 0) {
@@ -515,8 +534,10 @@ static void handle_line(char *line)
         app_cfg_cmd_handle(sub, rest);
     } else if (strcmp(cmd, "motion") == 0 || strcmp(cmd, "stand") == 0 ||
                strcmp(cmd, "estop") == 0 || strcmp(cmd, "lg") == 0 ||
-               strcmp(cmd, "lgtest") == 0 || strcmp(cmd, "readback") == 0) {
-        /* P2：固定周期运动、站姿、急停、单通道映射核对 */
+               strcmp(cmd, "lgtest") == 0 || strcmp(cmd, "readback") == 0 ||
+               strcmp(cmd, "gait") == 0 || strcmp(cmd, "jog") == 0 ||
+               strcmp(cmd, "turn") == 0 || strcmp(cmd, "chain") == 0) {
+        /* P2/P3：固定周期运动、站姿、行走、急停、单通道映射核对 */
         app_motion_cmd_handle(cmd, args);
     } else {
         ESP_LOGW(TAG, "未知命令 '%s'，输入 help 查看用法", cmd);
