@@ -111,11 +111,14 @@ static void eff_push_gait(action_effects_t *eff, int mode)
  *
  * ⚠️ `abs(spd_) > 0` 里的 `spd_` 是**形参**（未 float 化），但 `float(x) > 0` 与
  * `x > 0` 在数值上等价，照抄成 `fabsf(spd) > 0.0f`。
+ *
+ * 不需要 cfg：`gait(0)` 与 `servo_init(0)` 本身不带配置值 —— `gait(0)` 里那次
+ * "把三个重心目标重置成 `int(in_*)`" 由命令层 `control_chain_cmd_gait()` 负责
+ * （见 `ACTION_EFF_GAIT` 的注释），本层只把"发生了这次调用"记进效果表。
  */
-static void emit_move(const action_cfg_t *cfg, action_state_t *st,
+static void emit_move(action_state_t *st,
                       action_effects_t *eff, float spd, int L, int R)
 {
-    (void)cfg;
     eff_push(eff, ACTION_EFF_MOVE, spd, 0.0f, 0.0f, L, R);
     if ((L + R) != 0 && fabsf(spd) > 0.0f) {
         eff_push_gait(eff, 0);
@@ -366,7 +369,7 @@ void action_pose_anim_begin(action_state_t *st, const action_cfg_t *cfg,
     st->inplace_step_end_ms = 0;
     /* 732~733：move(0,0,0) 与 gait(0)。注意 `move(0,0,0)` 的 L+R==0 ⇒ 它**不会**
      * 联带 gait(0)/servo_init(0)（这与 `action_stand()` 里那两句是分开的两次调用）。 */
-    emit_move(cfg, st, eff, 0.0f, 0, 0);
+    emit_move(st, eff, 0.0f, 0, 0);
     eff_push_gait(eff, 0);
 
     if (from != NULL) {
@@ -385,6 +388,10 @@ void action_pose_anim_begin(action_state_t *st, const action_cfg_t *cfg,
 bool action_pose_anim_step(action_state_t *st, const action_cfg_t *cfg,
                            int32_t now_ms, float deg[ACTION_CHANNELS])
 {
+    /* 原 `_pose_anim_step()` 不读任何配置 —— 动画时长在 `_pose_anim_begin()` 里
+     * 就已经算进 `pose_anim_end_ms` 了（原实现是模块级全局，本模块放进 state）。
+     * 参数留着是为了和 `action_pose_anim_begin()` 的调用形态一致。 */
+    (void)cfg;
     if (st == NULL || !st->pose_anim_active) {
         return false;
     }
@@ -429,7 +436,7 @@ bool action_stand(const action_cfg_t *cfg, action_state_t *st, float cur_h_goal,
                   int32_t now_ms, float deg[ACTION_CHANNELS],
                   action_effects_t *eff)
 {
-    if (st == NULL) {
+    if (st == NULL || cfg == NULL) {
         return false;
     }
     /* 771~772：动画进行中直接 return —— **连爬行都不清、一个副作用都不做** */
@@ -439,7 +446,7 @@ bool action_stand(const action_cfg_t *cfg, action_state_t *st, float cur_h_goal,
     /* 773~775：清爬行 */
     eff_push_crawl_reset(eff);
     /* 776~777 */
-    emit_move(cfg, st, eff, 0.0f, 0, 0);
+    emit_move(st, eff, 0.0f, 0, 0);
     eff_push_gait(eff, 0);
     /* 778：height(int(H_goal))。`int()` 向零截断 */
     emit_height(eff, py_int(cur_h_goal));
@@ -472,7 +479,7 @@ bool action_sit_direct(const action_cfg_t *cfg, action_state_t *st, int32_t now_
                        float deg[ACTION_CHANNELS], action_effects_t *eff)
 {
     (void)deg;   /* 这条路径一个舵机都不写；参数只为接口一致 */
-    if (st == NULL) {
+    if (st == NULL || cfg == NULL) {
         return false;
     }
     /* 790~793：两个提前 return，**顺序照抄**（先动画、再冻结） */
@@ -486,7 +493,7 @@ bool action_sit_direct(const action_cfg_t *cfg, action_state_t *st, int32_t now_
     eff_push_crawl_reset(eff);
     st->inplace_step_end_ms = 0;
     /* 798~800 */
-    emit_move(cfg, st, eff, 0.0f, 0, 0);
+    emit_move(st, eff, 0.0f, 0, 0);
     eff_push_gait(eff, 0);
     emit_sit_offsets(eff, 0.0f, 0.0f);
     /* 801~802：height(86) 与 gesture(0, 0, in_y) —— 注意顺序：height 在前 */
@@ -513,7 +520,7 @@ bool action_sit(const action_cfg_t *cfg, action_state_t *st, int32_t now_ms,
 bool action_inplace_step(action_state_t *st, const action_cfg_t *cfg, int32_t now_ms,
                          action_effects_t *eff)
 {
-    if (st == NULL) {
+    if (st == NULL || cfg == NULL) {
         return false;
     }
     if (!st->inplace_step_end_ms) {
@@ -526,10 +533,7 @@ bool action_inplace_step(action_state_t *st, const action_cfg_t *cfg, int32_t no
         /* ⚠️ `move(3,1,1)` 会走 `move()` 的 if 分支，于是**自己把
          * `inplace_step_end_ms` 清零**（emit_move 里做的）。⇒ 这个"原地步态测试"
          * 原版只生效一帧。照抄，不"修正"。 */
-        emit_move(cfg, st, eff,
-                  (cfg != NULL) ? cfg->inplace_spd : 3.0f,
-                  (cfg != NULL) ? cfg->inplace_L : 1,
-                  (cfg != NULL) ? cfg->inplace_R : 1);
+        emit_move(st, eff, cfg->inplace_spd, cfg->inplace_L, cfg->inplace_R);
         return true;
     }
     /* 886~888：过期 —— 清截止时刻，只清偏置 */
@@ -578,7 +582,7 @@ static float wave_lift_s(const action_cfg_t *cfg)
 bool action_wave_step(action_state_t *st, action_wave_t *w, const action_cfg_t *cfg,
                       int32_t now_ms, float cur_h_goal, action_wave_step_t *out)
 {
-    if (st == NULL || w == NULL || out == NULL) {
+    if (st == NULL || w == NULL || out == NULL || cfg == NULL) {
         return false;
     }
     memset(out, 0, sizeof(*out));

@@ -11,6 +11,9 @@ rem If a compile line silently fails (e.g. the line endings were converted to LF
 rem so cmd.exe splits the '^' continuations), a stale exe would still run and the
 rem script would still print ALL GOLDEN TESTS PASSED -- a wrapper false-pass.
 rem Deleting them first makes a compile failure impossible to mask.
+rem Compile the host tests with -Werror: a warning must fail the build.  A reverted edit once
+rem removed a (void)cfg; and left an unused-parameter warning that this script happily ignored --
+rem a green run that hid a regression.
 if exist build del /q build\*.exe >nul 2>nul
 set FAILED=0
 
@@ -36,31 +39,31 @@ if not exist build mkdir build
 
 echo.
 echo [3/4] build host tests
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_kinematics.exe ^
     test_kinematics.c "..\..\firmware\src\control\kinematics.c" -lm
 if errorlevel 1 goto :err
 
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_body_pose.exe ^
     test_body_pose.c "..\..\firmware\src\control\body_pose.c" -lm
 if errorlevel 1 goto :err
 
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_gait_trot.exe ^
     test_gait_trot.c "..\..\firmware\src\control\gait_trot.c" -lm
 if errorlevel 1 goto :err
 
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_moving_avg.exe ^
     test_moving_avg.c "..\..\firmware\src\control\filter_moving_avg.c" -lm
 if errorlevel 1 goto :err
 
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_gait_walk.exe ^
     test_gait_walk.c "..\..\firmware\src\control\gait_walk.c" -lm
@@ -74,7 +77,7 @@ rem control_chain.c is linked in on purpose: the injection-table defaults have t
 rem compared field-by-field against control_chain_cfg_defaults(), i.e. against the
 rem function that the app layer will actually fill control_chain_cfg_t from. It is
 rem pure C, but it calls the five control/ math modules, so they come along.
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_app_config.exe ^
     test_app_config.c ^
@@ -87,7 +90,7 @@ gcc -O2 -Wall -Wextra -std=c11 ^
     "..\..\firmware\src\control\servo_map.c" -lm
 if errorlevel 1 goto :err
 
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_servo_map.exe ^
     test_servo_map.c "..\..\firmware\src\control\servo_map.c" -lm
@@ -95,7 +98,7 @@ if errorlevel 1 goto :err
 
 rem control_chain is the whole P3 orchestration: it links every control/ math
 rem module it drives (trot/walk trajectory, body pose, IK, servo mapping).
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_control_chain.exe ^
     test_control_chain.c ^
@@ -111,7 +114,7 @@ rem Multi-frame sequence: runs mainloop() hundreds of times and compares every
 rem frame.  This covers what a single-frame comparison structurally cannot:
 rem cross-frame carry-over, command semantics and long-run drift.
 rem The command script is READ from its own CSV, not duplicated here (P-22/P-27).
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_control_chain_cmd.exe ^
     test_control_chain_cmd.c ^
@@ -133,7 +136,7 @@ rem (P-25); the state dump is what gives side effects any teeth.
 
 
 
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" ^
     -o build\test_action.exe ^
     test_action.c ^
@@ -153,7 +156,7 @@ rem PCA9685 shadow registers.  Checks cadence gating, the stand pose, e-stop,
 rem timeout stop, mode switching and selective write behaviour.
 rem Single-threaded stubs: LOGIC only, not concurrency and not real timing.
 rem The stubs are single-threaded with always-succeeding mutexes, so this cannot catch deadlocks, priority inversion, stack depth or real jitter.
-gcc -O2 -Wall -Wextra -std=c11 ^
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" -Ihost_stubs ^
     -o build\test_motion_app.exe ^
     test_motion_app.c host_stubs\host_sim.c ^
