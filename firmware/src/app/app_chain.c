@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file    app_chain.c
  * @brief   `control_chain` 的应用层封装实现
  *
@@ -247,6 +247,20 @@ esp_err_t app_chain_jog(float spd, int L, int R)
         return ESP_ERR_TIMEOUT;
     }
     control_chain_cmd_move(&s_cmd, &s_cfg, &s_st, spd, L, R);
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+esp_err_t app_chain_drive(float spd, int L, int R)
+{
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    /* drive() = move() 去掉 gait(0) ⇒ 不改步态，所以能留在 WALK（P-26） */
+    control_chain_cmd_drive(&s_cmd, &s_cfg, &s_st, spd, L, R);
     xSemaphoreGive(s_mutex);
     return ESP_OK;
 }

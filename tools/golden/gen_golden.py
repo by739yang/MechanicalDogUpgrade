@@ -18,6 +18,7 @@ import os
 import sys
 import math
 import random
+import struct
 import types
 from pathlib import Path
 
@@ -927,13 +928,16 @@ CHAIN_SEQ_SCRIPTS = {
         (180, "set_joy_turn", (0.0,)),
         (200, "move", (0.0, 0, 0)),
     ],
-    # 2) WALK 前进 80 帧 → 后退 40 帧 → 停 20 帧
-    #    （WALK 的 cal_w 会通过 padog.gesture() 改重心目标 —— 专门验跨帧保留）
+    # 2) WALK：**必须用 drive()，不能用 move()**
+    #    ⚠️ 这一条原来写的是 `gait(1)` + `move(...)`，而 `move()` 内部会 `gait(0)`
+    #    ⇒ 实际跑的是 TROT（四条腿对角同步）。是**可视化把腿画出来**才发现的：
+    #    图上不是四拍顺序。这就是 P-26：**用 move() 无法进入 WALK**，
+    #    原版为此专门有 `drive()`（注释："WALK 摇杆用，不切 gait_mode"）。
     2: [
+        (0, "drive", (-2.0, 1, 1)),
         (0, "gait", (1,)),
-        (0, "move", (-2.0, 1, 1)),
-        (80, "move", (2.0, 1, 1)),
-        (120, "move", (0.0, 0, 0)),
+        (80, "drive", (2.0, 1, 1)),
+        (120, "drive", (0.0, 0, 0)),
     ],
     # 3) 行进中反复 move()：验"模式没变就不重置相位"（原版 move 里 gait(0) 的行为）
     3: [
@@ -951,10 +955,11 @@ CHAIN_SEQ_SCRIPTS = {
         (80, "height", (81.0,)),
         (110, "gesture", (0.0, 0.0, 18.0)),
     ],
-    # 5) TROT ↔ WALK 切换：验"模式变了才 t=0"
+    # 5) TROT ↔ WALK 切换：验"模式变了才 t=0"；switching 后必须用 drive() 才留在 WALK
     5: [
         (0, "move", (-3.0, 1, 1)),
         (40, "gait", (1,)),
+        (60, "drive", (-3.0, 1, 1)),
         (100, "gait", (0,)),
         (160, "move", (0.0, 0, 0)),
     ],
@@ -971,6 +976,7 @@ CHAIN_SEQ_ACTION_CODES = {
     "height": 2,
     "gesture": 3,
     "set_joy_turn": 4,
+    "drive": 5,
 }
 
 
@@ -1029,6 +1035,576 @@ def gen_control_chain_seq(fh, tmpdir):
 
     print("  control_chain_seq golden 行数: %d 帧，命令 %d 条"
           "（参考值 = 原版 mainloop 连跑）" % (rows, cmd_rows))
+    return rows
+
+
+# ============================================================================
+#  P4: 姿态动画 / 动作层 (action.c)
+# ============================================================================
+#
+# 这一层和前面每一套都不同：它**跨模块改状态**。`action_stand()` 会
+# `move()/gait()/height()/gesture()/set_leg_sit_offsets()`，
+# `_pose_anim_begin()` 还会清 chain 的爬行状态，`mainloop` 开头那段会
+# `move(3,1,1)`。所以参考值不能只记 12 路占空比 —— 还要记"调用完之后那些
+# **模块级全局**变成了什么"。
+#
+# 取法（和 `control_chain` 同一套）：
+#   把真版 `padog.py` exec 进来（`load_padog_ns()`），把模块级全局**按用例注入**，
+#   调**原函数**，然后一起写进 CSV：
+#     * 12 路**角度**（把真版 `PA_SERVO.angle` 包一层记下它收到的实参）
+#     * 12 路**占空比**（记录型 I2C 记下原代码真正写进 PCA9685 的字节）
+#     * 22 个模块级全局的**事后值**（副作用有没有如实发生，全在这里）
+#
+# 时钟：`mpy_stubs.install_controllable_clock()` 把 `utime.ticks_ms()` 钉死。
+# 为什么必须钉、为什么钉了仍然忠实，见 `mpy_stubs.py` 里那段长注释。
+#
+# ⚠️ 三套 CSV 的分工：
+#   `action_pose.csv` —— 纯函数（姿态表 / 插值 / 两种直写），比**角度**（0 容差）
+#   `action_cmd.csv`  —— 三个动作入口 + mainloop 的姿态动画段，比**占空比 + 22 个全局量**
+#   `action_wave.csv` —— `action_wave_direct()` 整条阻塞脚本，比**整条写寄存器日志**（含时刻）
+
+#: 参考值/被测代码共用的模拟时钟起点。只要求非 0 且离"环绕"很远，
+#: 好让"截止时刻已过期 / 未过期 / 正好相等"三个分支都落在有意义的位置。
+ACTION_CLOCK_BASE = 100000
+
+#: 12 个中位角在 CSV 里的列序 —— 与 `config_s.py` / `control_chain_cfg_t.init` 一致：
+#: 腿1..腿4 × (髋, 大腿, 小腿)。⚠️ **不是**逻辑通道序（见 `servo_map.h` 那张表）。
+ACTION_INIT_COLS = ("1p", "1h", "1s", "2p", "2h", "2s",
+                    "3p", "3h", "3s", "4p", "4h", "4s")
+
+#: 真机中位角（config_s.py 实测值）= 第一组采样
+ACTION_INIT_REAL = [102, 84, 92, 96, 91, 85, 108, 78, 68, 92, 98, 102]
+
+
+def _action_init_sets():
+    """中位角采样组。
+
+    * `real`：真机值。
+    * `distinct`：12 个**互不相等**、量级各异的值 —— 否则"通道映射错位"测不出来
+      （成长手册 P-18：全相等 / 对称的输入等于没测）。
+    * `out_of_range`：两侧都越界（>180 与 <0），用来钉 `_clamp_deg` 加在哪几路上：
+      `_apply_pose_blend` **每路都夹**、`_apply_stand_angles_direct` **只夹髋**。
+      这两件事只有在**角度**域才看得见（`PA_SERVO.angle` 会把占空比夹回
+      [102,511]，所以占空比里"越界"和"夹过"长得一模一样）。
+    """
+    return (
+        ("real config_s.py", list(ACTION_INIT_REAL)),
+        ("in-range, 12 distinct (P-18)",
+         [11, 22, 33, 44, 55, 66, 77, 88, 99, 111, 122, 133]),
+        ("out of range on both sides",
+         [200, -10, 190, 96, 91, 185, 108, -40, 68, -25, 98, 102]),
+    )
+
+
+#: 插值系数采样。**全部是二进制精确值**（0/±0.5/±0.25/±0.75/1），且 `_sit_pose()`
+#: 的 12 个偏移全是 4 的倍数 ⇒ `p0 + (p1-p0)*t` 在 float 与 double 里**逐位相同**。
+#: 这就是"角度可以要求 0 容差"的**前提**，不是碰运气。
+#: 端点外的两个值（-0.5 / 1.5）专门覆盖 `t` 的夹限分支。
+ACTION_BLEND_T = (-0.5, 0.0, 0.25, 0.5, 0.75, 1.0, 1.5)
+
+
+class _AngleRecorder:
+    """把真版 `PA_SERVO.angle` 包一层：记下它**收到的角度**，然后原样调用。
+
+    为什么要包：`PA_SERVO.angle()` 内部会把角度夹到占空比区间 `[102, 511]`
+    （`Servos.position()`），于是**在占空比里看不出角度越界** —— 而 `_clamp_deg`
+    究竟加在哪几路上正是这一层最容易抄错的地方。包一层才能拿到"原代码真正往下传的
+    角度"，于是可以要求**角度 0 容差**。
+
+    包装**不改变任何行为**：记完立刻调用原件；`_orig` 保存的也是原件。
+    """
+
+    def __init__(self, orig, clock):
+        self._orig = orig
+        self._clock = clock
+        self.log = []          # [(clock_ms, logical_ch, deg), ...]
+
+    def hook(self, ch, deg):
+        self.log.append((self._clock.now_ms, int(ch), float(deg)))
+        return self._orig(ch, deg)
+
+    def clear(self):
+        self.log.clear()
+
+
+_ANGLE_REC = None
+
+
+def _angle_recorder(clock):
+    """装一次、全局复用（重复包装会记两遍）"""
+    global _ANGLE_REC
+    if _ANGLE_REC is None:
+        servo = sys.modules["PA_SERVO"]
+        _ANGLE_REC = _AngleRecorder(servo.angle, clock)
+        servo.angle = _ANGLE_REC.hook
+    return _ANGLE_REC
+
+
+def _action_env(tmpdir, clock):
+    """一次"真版 padog 环境"：返 (命名空间, 记录型I2C, 角度记录**列表**)
+
+    第三个是 `_AngleRecorder.log` 本身（一个 list），`clear()` / `len()` 都是 list 的。
+    """
+    ns = load_padog_ns(tmpdir)
+    rec = sys.modules["PA_SERVO"]._i2c_servo
+    return ns, rec, _angle_recorder(clock).log
+
+
+def _action_set_init(ns, init12):
+    for i, name in enumerate(ACTION_INIT_COLS):
+        ns["init_%s" % name] = init12[i]
+
+
+def _capture(rec, log):
+    """把一次调用记录的 (角度, 占空比) 取出来，并**校验一一对应**。
+
+    角度来自 `PA_SERVO.angle` 的包装（原代码传下去的值），占空比来自记录型 I2C
+    （原代码真正写进 PCA9685 的字节）。两者必须**同长度、同通道集合**；
+    否则说明"一次 angle() 正好写一次寄存器"这个假设不成立 —— 直接报错，不猜
+    （成长手册 P-22：参考值用到的输入必须由参考实现自己产生）。
+    """
+    writes = rec.led_writes()
+    if len(writes) != len(log):
+        raise SystemExit("action: %d 次 angle() 却记录到 %d 次寄存器写"
+                         % (len(log), len(writes)))
+    degs, duties = {}, {}
+    for (_t, ch, deg) in log:
+        if ch in degs:
+            raise SystemExit("action: 同一次调用里逻辑通道 %d 被写了两次" % ch)
+        degs[ch] = deg
+    for (addr, ch, on, off) in writes:
+        lch = ch if addr == 0x40 else ch + 6
+        if on != 0 or not (0 <= off <= 511):
+            raise SystemExit("action: 意外的 (ON,OFF)=(%d,%d)；本层的占空比只落在 "
+                             "[102,511]（0 会走 4096 那个特殊分支）" % (on, off))
+        duties[lch] = off
+    if set(degs) != set(duties):
+        raise SystemExit("action: 角度与占空比的通道集合不一致：%s vs %s"
+                         % (sorted(degs), sorted(duties)))
+    return degs, duties
+
+
+def _gv(v):
+    """CSV 取值：bool -> 0/1（**必须先判**，bool 是 int 的子类），int -> %d，其余 %.6f"""
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, int):
+        return "%d" % v
+    return "%.6f" % v
+
+
+def _require_float_exact(v, what):
+    """断言一个浮点参考值**能被 float32 精确表示**。
+
+    为什么要有这一条：`action.c` 用 `float`（ESP32 只有单精度硬件 FPU，见 README），
+    参考值来自 Python 的 `double`。C 侧与参考值做**精确相等**比较时，只有当这个值
+    在 float 里可精确表示才成立。与其事后偷偷放一个容差，不如在**生成参考值时**
+    就把不合规的值挡下来 —— 这是"不放松容差"的机器化版本（成长手册 P-17/P-18）。
+    """
+    back = struct.unpack("<f", struct.pack("<f", float(v)))[0]
+    if back != float(v):
+        raise SystemExit("action: %s=%r 不能被 float32 精确表示，"
+                         "这个用例无法做 0 容差比较（换采样点，别放宽容差）"
+                         % (what, v))
+
+
+# ---------------------------------------------------------------------------
+#  [A] action_pose.csv —— 纯函数，比角度
+# ---------------------------------------------------------------------------
+
+def gen_action_pose(fh, tmpdir, clock):
+    fh.write("# padog.py 姿态表/插值 golden vectors\n")
+    fh.write("# 参考值 = 真版 padog.py 命名空间（load_padog_ns），时钟由 "
+             "mpy_stubs.install_controllable_clock() 钉死\n")
+    fh.write("# 列: fn,param,init_1p..init_4s(12),deg0..deg11(12),duty0..duty11(12)\n")
+    fh.write("# fn=0: _apply_pose_blend(_stand_pose(), _sit_pose(), param)\n")
+    fh.write("# fn=1: _apply_stand_angles_direct()      fn=2: _apply_sit_angles_direct()\n")
+    fh.write("# deg  = 原代码传给 PA_SERVO.angle() 的角度（未过占空比夹限），C 侧按 "
+             "**0 容差**比\n")
+    fh.write("# duty = 它最终写进寄存器的占空比计数\n")
+    fh.write("# param 只取二进制精确值、sit 偏移全是 4 的倍数 => 插值 float/double "
+             "逐位相同\n")
+    fh.write("# init 列序 = 腿1..腿4 x (髋,大腿,小腿)，与 config_s.py 一致\n")
+
+    ns, rec, log = _action_env(tmpdir, clock)
+    clock.set(ACTION_CLOCK_BASE)
+
+    rows = 0
+    for note, init12 in _action_init_sets():
+        fh.write("# init set: %s\n" % note)
+        _action_set_init(ns, init12)
+        calls = [(0, t) for t in ACTION_BLEND_T] + [(1, 0.0), (2, 0.0)]
+        for (fn, param) in calls:
+            rec.clear()
+            log.clear()
+            if fn == 0:
+                # 用**原函数自己的两张表**，不在生成器里另造输入（P-22）
+                ns["_apply_pose_blend"](ns["_stand_pose"](), ns["_sit_pose"](), param)
+            elif fn == 1:
+                ns["_apply_stand_angles_direct"]()
+            elif fn == 2:
+                ns["_apply_sit_angles_direct"]()
+            else:
+                raise SystemExit("action_pose: 未知 fn=%d" % fn)
+
+            degs, duties = _capture(rec, log)
+            if len(degs) != 12:
+                raise SystemExit("action_pose: 期望 12 路，实际 %d 路" % len(degs))
+
+            fields = [fn, param] + list(init12)
+            fields += [degs[i] for i in range(12)]
+            fields += [duties[i] for i in range(12)]
+            fh.write(",".join(_gv(v) for v in fields) + "\n")
+            rows += 1
+
+    print("  action_pose golden 行数: %d（3 组中位角 x 9 个采样）" % rows)
+    return rows
+
+
+# ---------------------------------------------------------------------------
+#  [B] action_cmd.csv —— 动作入口 + mainloop 姿态动画段，比占空比 + 22 个全局量
+# ---------------------------------------------------------------------------
+
+#: 前置状态列（33 = 21 + 12 个中位角）。C 侧按同一顺序解析。
+ACTION_CMD_PRE = (
+    "action", "now_ms", "pair", "anim_start_ms", "anim_end_ms", "anim_hold_freeze",
+    "cur_h_goal", "gait_mode", "t",
+    "crawl_phase", "crawl_until_ms", "crawl_settle_until_ms", "inplace_step_end_ms",
+    "direct_pose_freeze", "pose_anim_active",
+    "front_y", "rear_y", "in_y", "in_pit", "in_rol", "init_case",
+) + tuple("init_%s" % s for s in ACTION_INIT_COLS)
+
+#: 事后状态列（35 = 1 + 12 占空比 + 22 个全局量）。
+#: ⚠️ **这 22 个的顺序必须与 test_action.c 的 `dump_state()` 一一对应** ——
+#: 它就是"副作用有没有如实发生"的全部证据（P-25）。
+ACTION_CMD_POST = ("n_writes",) + tuple("duty%d" % i for i in range(12)) + (
+    "direct_pose_freeze", "pose_anim_active", "pose_anim_hold_freeze",
+    "pose_anim_start_ms", "pose_anim_end_ms",
+    "crawl_phase", "crawl_until_ms", "crawl_settle_until_ms", "inplace_step_end_ms",
+    "spd", "L", "R", "gait_mode", "t",
+    "H_goal", "R_H", "PIT_goal", "ROL_goal", "X_goal",
+    "front_y", "rear_y", "init_case",
+)
+
+#: 动作编号（写进 CSV，C 侧按同一张表解释）
+ACTION_CMD_CODES = {
+    0: "action_stand",
+    1: "action_sit",           # 别名，与 2 等价（生成器会自己验一遍）
+    2: "action_sit_direct",
+    3: "mainloop",             # 只用到它的"inplace 服务 + 姿态动画"那两段
+}
+
+
+def _cmd_cases():
+    """`action_cmd.csv` 的用例表。
+
+    每行 = **一次调用**（`action_stand` / `action_sit` / `action_sit_direct` /
+    `mainloop`），前置状态全部由列显式给出，事后状态全部逐项对照。
+    """
+    A0 = ACTION_CLOCK_BASE + 300
+    base = dict(action=0, now=A0, pair=0, anim_start=0, anim_end=0, hold=0,
+                h_goal=81.0, gait=0, t=0.0, crawl=0, until=0, settle=0,
+                inplace=0, freeze=0, active=0, front=0.0, rear=0.0,
+                in_y=18, in_pit=0, in_rol=0, init_case=0,
+                init=list(ACTION_INIT_REAL))
+
+    def mk(**kw):
+        c = dict(base)
+        c.update(kw)
+        return c
+
+    cases = []
+
+    # ---- action_stand（0）----
+    # 直写支：12 路 = 中位角（髋夹、腿不夹），H_goal 被 height() 覆写
+    cases.append(mk(action=0))
+    # 动画支（direct_pose_freeze=True）：坐 -> 站，**一个舵机都不写**
+    cases.append(mk(action=0, freeze=1))
+    # 提前 return：pose_anim_active 为真 => 连爬行都不清。
+    # ⚠️ h_goal 用 70.5（而不是 70.6）：这一支**不改** H_goal，它会原样出现在事后
+    #    状态里，而事后状态要求 float32 精确可表示（0 容差）。截断本身的用例在下面。
+    cases.append(mk(action=0, active=1, freeze=1, crawl=1, until=12345,
+                    inplace=ACTION_CLOCK_BASE + 999, h_goal=70.5))
+    # height(int(H_goal)) 的**向零截断**（80.9 -> 80，-3.7 -> -3）
+    cases.append(mk(action=0, h_goal=80.9))
+    cases.append(mk(action=0, h_goal=-3.7))
+    # 直写支 + 一大堆副作用同时非默认：
+    #   gait_mode=1 => 第一次 gait(0) 会把 t 归零；in_pit/in_rol 非 0 时
+    #   "gesture 在 gait 之后"这件事才看得出来（否则两者写成同一组值）
+    cases.append(mk(action=0, h_goal=80.9, gait=1, t=0.5, crawl=1, until=12345,
+                    settle=23456, inplace=ACTION_CLOCK_BASE + 999, init_case=1,
+                    front=7.0, rear=-3.0, in_y=25, in_pit=3, in_rol=-2))
+    # 动画支 + 同样的非默认：这一支里 gesture 之后**还有一次 gait(0)**
+    #   => 三个目标最终应等于 int(in_pit)/int(in_rol)/int(in_y)（不是 0/0/25）
+    cases.append(mk(action=0, freeze=1, h_goal=70.6, gait=1, t=0.5, crawl=1,
+                    until=12345, settle=23456, inplace=ACTION_CLOCK_BASE + 999,
+                    init_case=1, front=7.0, rear=-3.0, in_y=25,
+                    in_pit=3, in_rol=-2))
+    # 越界中位角（角度由 action_pose 那套钉，这里看占空比与状态）
+    cases.append(mk(action=0, init=[200, -10, 190, 96, 91, 185,
+                                    108, -40, 68, -25, 98, 102]))
+
+    # ---- action_sit / action_sit_direct（1 / 2）----
+    cases.append(mk(action=1))
+    cases.append(mk(action=2))
+    # 两个提前 return。⚠️ 它们在**外部状态上无法区分**（都在清爬行之前 return）——
+    # 这不是输入没区分度，而是这两条分支本来就没有可观察差异；留着是为了
+    # 万一将来原实现把顺序改了，对照关系还在。
+    cases.append(mk(action=1, freeze=1, crawl=1, inplace=ACTION_CLOCK_BASE + 999))
+    cases.append(mk(action=1, active=1, crawl=1, inplace=ACTION_CLOCK_BASE + 999))
+    cases.append(mk(action=1, active=1, freeze=1))
+    # 正常路径 + 非默认副作用（注意：这一支的最后一次 gait(0) 同样覆盖 gesture）
+    cases.append(mk(action=2, crawl=1, until=12345, settle=23456,
+                    inplace=ACTION_CLOCK_BASE + 999, init_case=1,
+                    front=5.0, rear=-4.0, in_y=-7, in_pit=3, in_rol=-2,
+                    gait=1, t=0.5))
+    # 另一组中位角（证明 C 版真的用了配置里的中位角）
+    cases.append(mk(action=2, init=[11, 22, 33, 44, 55, 66, 77, 88, 99, 111, 122, 133],
+                    in_y=25))
+
+    # ---- mainloop 的 inplace 服务 + 姿态动画段（3）----
+    # ⚠️ 这些行**必须** pose_anim_active=True：否则 mainloop 会继续往下跑整条运动链，
+    #    那不是本模块的范围。crawl 的三个量固定为 0，于是 mainloop 第 877~879 行
+    #    都是 no-op（那几行属于 chain 层，control_chain.c 已经实现）。
+    common = dict(action=3, active=1, anim_start=A0, anim_end=A0 + 900, pair=0)
+    cases.append(mk(**common))                                   # t = 0
+    cases.append(mk(**dict(common, now=A0 + 225)))               # t = 0.25
+    cases.append(mk(**dict(common, now=A0 + 450)))
+    cases.append(mk(**dict(common, now=A0 + 899)))               # 差 1 ms 没到
+    cases.append(mk(**dict(common, now=A0 + 900)))               # t = 1 -> 完成
+    cases.append(mk(**dict(common, now=A0 + 1500)))              # t > 1 -> 完成
+    cases.append(mk(**dict(common, now=A0 + 900, hold=1)))       # 完成后冻结
+    cases.append(mk(**dict(common, now=A0 + 400, pair=1)))       # 坐 -> 站的反向
+    cases.append(mk(**dict(common, now=A0, anim_start=A0, anim_end=A0)))       # total<=0
+    cases.append(mk(**dict(common, now=A0 + 1, anim_start=A0, anim_end=A0)))   # total<=0 且已到
+    cases.append(mk(**dict(common, now=A0 - 100)))               # 负 elapsed -> t<0
+    cases.append(mk(**dict(common, init=[11, 22, 33, 44, 55, 66,
+                                         77, 88, 99, 111, 122, 133],
+                             now=A0 + 300)))
+    # inplace 服务三个分支
+    cases.append(mk(**dict(common, inplace=A0 + 500, init_case=1)))   # 未过期 -> move(3,1,1)
+    cases.append(mk(**dict(common, inplace=A0 - 500)))                # 已过期 -> 只清
+    cases.append(mk(**dict(common, inplace=A0)))                      # 正好相等 -> 走过期支
+    # 未过期 + 动画同帧完成：move() 先置 direct_pose_freeze=False，
+    # 之后 _pose_anim_step() 又置成 hold_freeze -> 顺序错了就会 FAIL
+    cases.append(mk(**dict(common, inplace=A0 + 500, init_case=1,
+                           now=A0 + 900, hold=1)))
+    cases.append(mk(**dict(common, inplace=A0 + 500, front=4.0, rear=-6.0,
+                           now=A0 + 100)))
+    return cases
+
+
+def _action_cmd_reference(c, tmpdir, clock):
+    """跑一次真版 `padog.py`，返回 (写了几路, {通道: 占空比}, 22 个事后全局量)"""
+    ns, rec, log = _action_env(tmpdir, clock)
+    _action_set_init(ns, c["init"])
+
+    # 注入前置状态。**只注入本层真的会读的那些量**；其余保持模块初值
+    # （`load_padog_ns()` 每次重新 exec padog.py，所以模块级状态天然干净）。
+    ns["in_y"] = c["in_y"]
+    ns["in_pit"] = c["in_pit"]
+    ns["in_rol"] = c["in_rol"]
+    ns["H_goal"] = c["h_goal"]          # R_H 不动：padog.py 第 156~157 行已经 = int(H_goal)
+    ns["gait_mode"] = c["gait"]
+    ns["t"] = c["t"]
+    ns["crawl_phase"] = c["crawl"]
+    ns["crawl_until_ms"] = c["until"]
+    ns["crawl_settle_until_ms"] = c["settle"]
+    ns["inplace_step_end_ms"] = c["inplace"]
+    ns["direct_pose_freeze"] = bool(c["freeze"])
+    ns["pose_anim_active"] = bool(c["active"])
+    ns["pose_anim_hold_freeze"] = bool(c["hold"])
+    ns["pose_anim_start_ms"] = c["anim_start"]
+    ns["pose_anim_end_ms"] = c["anim_end"]
+    ns["front_leg_y_offset"] = c["front"]
+    ns["rear_leg_y_offset"] = c["rear"]
+    ns["init_case"] = c["init_case"]
+    # 三个重心目标的"上电初值"（padog.py:146 是 `int(in_pit)/int(in_rol)/int(in_y)`）。
+    # ⚠️ 用**原函数** `gesture()` 施加，不在这里手抄那个表达式（P-22 / P-24 的教训：
+    #    要断言/设置什么，就让权威实现去做）。
+    ns["gesture"](int(c["in_pit"]), int(c["in_rol"]), int(c["in_y"]))
+    # 动画的两个端点：用**原函数自己的两张表**，与 `action_sit_direct()` 内部一致
+    ns["pose_anim_from"] = ns["_stand_pose"]() if c["pair"] == 0 else ns["_sit_pose"]()
+    ns["pose_anim_to"] = ns["_sit_pose"]() if c["pair"] == 0 else ns["_stand_pose"]()
+
+    rec.clear()
+    log.clear()
+    clock.set(c["now"])
+
+    fn = c["action"]
+    if fn == 0:
+        ns["action_stand"]()
+    elif fn == 1:
+        ns["action_sit"]()
+    elif fn == 2:
+        ns["action_sit_direct"]()
+    elif fn == 3:
+        ns["mainloop"]()
+    else:
+        raise SystemExit("action_cmd: 未知 action=%d" % fn)
+
+    _degs, duties = _capture(rec, log)
+
+    post = [
+        ns["direct_pose_freeze"], ns["pose_anim_active"], ns["pose_anim_hold_freeze"],
+        ns["pose_anim_start_ms"], ns["pose_anim_end_ms"],
+        ns["crawl_phase"], ns["crawl_until_ms"], ns["crawl_settle_until_ms"],
+        ns["inplace_step_end_ms"],
+        ns["spd"], ns["L"], ns["R"], ns["gait_mode"], ns["t"],
+        ns["H_goal"], ns["R_H"], ns["PIT_goal"], ns["ROL_goal"], ns["X_goal"],
+        ns["front_leg_y_offset"], ns["rear_leg_y_offset"], ns["init_case"],
+    ]
+    if len(post) != len(ACTION_CMD_POST) - 13:
+        raise SystemExit("action_cmd: 事后状态列数对不上")
+    return len(log), duties, post
+
+
+def gen_action_cmd(fh, tmpdir, clock):
+    fh.write("# padog.py 动作层入口 golden vectors（参考值 = 真版 padog 命名空间）\n")
+    fh.write("# action: 0=action_stand 1=action_sit 2=action_sit_direct 3=mainloop\n")
+    fh.write("#   （3 只用到 mainloop 的 inplace 服务 + _pose_anim_step 那两段；\n")
+    fh.write("#     所以 action=3 的行必须 pose_anim_active=1、crawl 三个量=0）\n")
+    fh.write("# 前置列: %s\n" % ",".join(ACTION_CMD_PRE))
+    fh.write("# 事后列: %s\n" % ",".join(ACTION_CMD_POST))
+    fh.write("# 事后那几个全局量就是「副作用有没有如实发生」的全部证据（成长手册 P-25）\n")
+    fh.write("# 所有事后浮点值都保证能被 float32 精确表示 => C 侧可以要求 0 容差\n")
+
+    rows = 0
+    for c in _cmd_cases():
+        pre = [c["action"], c["now"], c["pair"], c["anim_start"], c["anim_end"],
+               c["hold"], c["h_goal"], c["gait"], c["t"],
+               c["crawl"], c["until"], c["settle"], c["inplace"],
+               c["freeze"], c["active"], c["front"], c["rear"],
+               c["in_y"], c["in_pit"], c["in_rol"], c["init_case"]] + list(c["init"])
+        if len(pre) != len(ACTION_CMD_PRE):
+            raise SystemExit("action_cmd: 前置列数对不上（%d vs %d）"
+                             % (len(pre), len(ACTION_CMD_PRE)))
+
+        n, duties, post = _action_cmd_reference(c, tmpdir, clock)
+
+        # "不放松容差"的机器化保证：事后每个浮点值都必须 float32 精确可表示
+        for (name, v) in zip(ACTION_CMD_POST[13:], post):
+            if isinstance(v, float):
+                _require_float_exact(v, "action=%d %s" % (c["action"], name))
+
+        fields = pre + [n] + [duties.get(i, 0) for i in range(12)] + post
+        fh.write(",".join(_gv(v) for v in fields) + "\n")
+        rows += 1
+
+    _verify_aliases(tmpdir, clock)
+    print("  action_cmd golden 行数: %d（含 mainloop 姿态动画与 inplace 服务）" % rows)
+    return rows
+
+
+def _verify_aliases(tmpdir, clock):
+    """参考侧验证那一对别名函数。
+
+    `action_sit()` / `action_wave()` 在原实现里就是一行调用。这里**在真版参考实现
+    自己身上跑两遍、比结果**，而不是靠读代码下结论（成长手册 P-24：
+    "要断言某个值，就把它算出来"）。不一致就直接让生成失败。
+
+    ⚠️ 顺带把"别名等价"钉在了**参考实现**上：C 版只有一个函数，
+    所以 CSV 里只留一份参考值。
+    """
+    pairs = (("action_sit", "action_sit_direct"),
+             ("action_wave", "action_wave_direct"))
+    for (a, b) in pairs:
+        got = []
+        for fn in (a, b):
+            ns, rec, log = _action_env(tmpdir, clock)
+            rec.clear()
+            log.clear()
+            clock.set(ACTION_CLOCK_BASE)
+            ns[fn]()
+            got.append((
+                [(addr, ch, on, off) for (addr, ch, on, off) in rec.led_writes()],
+                ns["direct_pose_freeze"], ns["pose_anim_active"],
+                ns["pose_anim_hold_freeze"], ns["inplace_step_end_ms"],
+                ns["pose_anim_start_ms"], ns["pose_anim_end_ms"],
+                clock.now_ms - ACTION_CLOCK_BASE,
+            ))
+        if got[0] != got[1]:
+            raise SystemExit("golden 参考侧：%s() 与 %s() 的结果不一致" % (a, b))
+    print("  参考侧别名验证: action_sit == action_sit_direct, "
+          "action_wave == action_wave_direct")
+
+
+# ---------------------------------------------------------------------------
+#  [C] action_wave.csv + action_wave_final.csv —— 整条阻塞脚本，比"写寄存器日志"
+# ---------------------------------------------------------------------------
+
+def gen_action_wave(fh, wfh, tmpdir, clock):
+    """
+    参考值 = 把真版 `action_wave_direct()` **一次跑完**，记下每一次 `angle()`：
+    (时刻, 通道, 角度) 与 (addr, pca_ch, on, off)。时钟是假的，所以整条脚本
+    瞬间跑完而且完全可复现。
+
+    ⚠️ `action_wave_direct()` 里 `_wait_pose_anim_done()` 会调 `mainloop()`；
+    在这个状态下 mainloop 只会走到 `_pose_anim_step()` 就 return
+    （爬行与 inplace 都被 `action_sit_direct()` 清了），所以它写出的就是姿态动画的
+    12 路插值 —— 这正是 C 版 `action_wave_step()` 的 WAIT 阶段要做的事。
+
+    **分组**：原实现"写一组舵机 -> sleep 一段"，所以**同一毫秒内的那些写正好就是一步**
+    （12 路插值 / 4 路 / 3 路 / 1 路）。按时间戳分组，`t_off` 列同时把每一步的
+    **时序**钉住 —— 光比"写了什么"是钉不住 `sleep` 时长的。
+    """
+    ns, rec, log = _action_env(tmpdir, clock)
+    clock.set(ACTION_CLOCK_BASE)
+    rec.clear()
+    log.clear()
+    ns["action_wave_direct"]()
+
+    writes = rec.led_writes()
+    if len(writes) != len(log):
+        raise SystemExit("action_wave: %d 次 angle() 却记录到 %d 次寄存器写"
+                         % (len(log), len(writes)))
+
+    groups = []
+    for i, (t, _ch, _deg) in enumerate(log):
+        if not groups or groups[-1][0] != t:
+            groups.append((t, []))
+        groups[-1][1].append(i)
+
+    fh.write("# padog.action_wave_direct() golden vectors（参考值 = 原版真跑一次）\n")
+    fh.write("# 列: group,t_off,ch,duty\n")
+    fh.write("# t_off = 相对本次动作开始时刻的毫秒偏移 —— 它把每一步之后的\n")
+    fh.write("#         time.sleep_ms() 也钉住了（只比写了什么是钉不住时序的）\n")
+    fh.write("# group = 同一毫秒内的那些写；组内按逻辑通道升序\n")
+    fh.write("# ch = 逻辑通道 0..11；duty = 写进 PCA9685 的占空比计数\n")
+
+    rows = 0
+    for gi, (t, idxs) in enumerate(groups):
+        for i in sorted(idxs, key=lambda k: log[k][1]):
+            _t, ch, _deg = log[i]
+            addr, pch, on, off = writes[i]
+            lch = pch if addr == 0x40 else pch + 6
+            if lch != ch or on != 0 or not (0 <= off <= 511):
+                raise SystemExit("action_wave: 两个记录器对不上："
+                                 "angle(ch=%d) vs i2c(addr=%#x,pca=%d,on=%d,off=%d)"
+                                 % (ch, addr, pch, on, off))
+            fh.write("%d,%d,%d,%d\n" % (gi, t - ACTION_CLOCK_BASE, ch, off))
+            rows += 1
+
+    # ---- 结束时的状态（它是"动作末尾留下了什么"的完整证据）----
+    final = [
+        clock.now_ms - ACTION_CLOCK_BASE, len(groups), len(writes),
+        ns["pose_anim_active"], ns["pose_anim_hold_freeze"], ns["direct_pose_freeze"],
+        ns["pose_anim_start_ms"] - ACTION_CLOCK_BASE,
+        ns["pose_anim_end_ms"] - ACTION_CLOCK_BASE,
+        ns["inplace_step_end_ms"], ns["crawl_phase"], ns["gait_mode"], ns["t"],
+        ns["spd"], ns["L"], ns["R"], ns["H_goal"], ns["R_H"],
+        ns["PIT_goal"], ns["ROL_goal"], ns["X_goal"],
+        ns["front_leg_y_offset"], ns["rear_leg_y_offset"], ns["init_case"],
+    ]
+    wfh.write("# padog.action_wave_direct() 结束状态 golden\n")
+    wfh.write("# 列: t_off,n_groups,n_writes,pose_anim_active,pose_anim_hold_freeze,"
+              "direct_pose_freeze,anim_start_off,anim_end_off,inplace_step_end_ms,"
+              "crawl_phase,gait_mode,t,spd,L,R,H_goal,R_H,PIT_goal,ROL_goal,X_goal,"
+              "front_y,rear_y,init_case\n")
+    wfh.write(",".join(_gv(v) for v in final) + "\n")
+
+    print("  action_wave golden 行数: %d（%d 组，%d 个全局量）"
+          % (rows, len(groups), len(final)))
     return rows
 
 
@@ -1094,7 +1670,29 @@ def main():
         with open(OUT / "control_chain_seq.csv", "w", encoding="utf-8", newline="\n") as fh:
             total += gen_control_chain_seq(fh, tmpdir)
 
-    print("\n完成。共 9 个 suite, %d 行。" % total)
+        # ---- P4：姿态动画 / 动作层 ----------------------------------------
+        #
+        # ⚠️ 这一段**放在最后**，而且 clock 只在这里装：它会把
+        # `sys.modules['utime']` 换成可控时钟、给 CPython 的 `time` 补 `sleep_ms`。
+        # 前面几套（尤其 control_chain 的爬行分支要读 ticks_ms）必须继续看到
+        # **安装之前**的那个 utime，否则参考值会变 —— 那是"改了别人的参考值"，
+        # 不是我要做的事。
+        print("\n[10/12] padog 姿态表/插值 -> action.c（纯函数，P4）...")
+        clock = mpy_stubs.install_controllable_clock(ACTION_CLOCK_BASE)
+        with open(OUT / "action_pose.csv", "w", encoding="utf-8", newline="\n") as fh:
+            total += gen_action_pose(fh, tmpdir, clock)
+
+        print("\n[11/12] padog 动作入口 + mainloop 姿态动画 -> action.c（P4）...")
+        with open(OUT / "action_cmd.csv", "w", encoding="utf-8", newline="\n") as fh:
+            total += gen_action_cmd(fh, tmpdir, clock)
+
+        print("\n[12/12] padog.action_wave_direct() -> action.c（阻塞脚本，P4）...")
+        with open(OUT / "action_wave.csv", "w", encoding="utf-8", newline="\n") as fh:
+            with open(OUT / "action_wave_final.csv", "w",
+                      encoding="utf-8", newline="\n") as wfh:
+                total += gen_action_wave(fh, wfh, tmpdir, clock)
+
+    print("\n完成。共 12 个 suite, %d 行。" % total)
     print("提示：这些 CSV 要提交进仓库，C 版测试只读它们。")
 
 

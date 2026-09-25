@@ -1,4 +1,4 @@
-# firmware —— 机械狗 ESP-IDF C 迁移工程
+﻿# firmware —— 机械狗 ESP-IDF C 迁移工程
 
 > 阶段：**P2 完成**（P0 工程骨架/日志/I2C/PCA9685 + P1 配置 NVS 与纯数学 +
 > P2 固定周期舵机输出）
@@ -160,7 +160,8 @@ off 0
 | `stand` | **原版真正的站姿**（走控制链 `cal_ges`→IK→`servo_output`） |
 | `stand direct` | **标定用站姿**（12 路 = 中位角）—— 两者不同，见下 |
 | `gait trot\|walk` | 选步态（相位 `t` 归零） |
-| `jog <spd> <L> <R>` | 行走；`jog -3 1 1` 前进，`jog 3 1 1` 后退，`jog 0 0 0` 站着不动 |
+| `jog <spd> <L> <R>` | 行走（= 原版 `move()`，**会切回 TROT**）；`jog -3 1 1` 前进 |
+| `drive <spd> <L> <R>` | 行走（= 原版 `drive()`，**不切步态**）—— **走 WALK 只能用这个** |
 | `turn <pct>` | 横杆转向百分比（`|pct| >= 10` 髋角才参与） |
 | `chain` | 打印控制链状态（相位 / 目标 / 12 路角度与占空比） |
 | `estop [原因]` | 急停：12 路松力 + 停任务（实测 31 ms） |
@@ -200,6 +201,16 @@ off 0
 ⇒ 推导：**链节拍周期（秒）= `speed`**，这样 `Ts = 1.0` 才真的等于"一个周期 1 秒"。
 运动任务仍跑 100 Hz（急停响应、将来 P4 的 IMU 闭环），只在链的节拍上推进；
 其余帧重新下发同一组角度 —— 因为 `servo_out` 只写变化的通道，**这些帧的 I2C 开销是 0**。
+
+**⚠️ 要跑 WALK 必须用 `drive`，不能用 `jog`**：`jog` 对应原版 `move()`，
+而 `move()` 内部会 `gait(0)` 把步态改回 TROT ⇒ "先 `gait walk` 再 `jog`" 永远走不出 WALK。
+原版为此专门设了 `drive()`（注释："WALK 摇杆用，不切 gait_mode"）。正确顺序：
+
+```
+motion mode chain
+gait walk
+drive -2 1 1        # ← 只有这个能留在 WALK
+```
 
 **"停止走路" ≠ "松力"**：
 

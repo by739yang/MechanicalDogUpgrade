@@ -90,6 +90,29 @@ void control_chain_cmd_init(control_chain_cmd_t *c, const control_chain_cfg_t *c
 void control_chain_cmd_move(control_chain_cmd_t *c, const control_chain_cfg_t *cfg,
                             control_chain_state_t *st, float spd, int L, int R);
 
+/**
+ * @brief 复刻 `padog.drive(spd, L, R)` —— **就是 `move()` 去掉 `gait(0)`**。
+ *
+ * ```python
+ * def drive(spd_, L_, R_):   # 注释原文："仅更新 spd/L/R（WALK 摇杆用，不切 gait_mode）"
+ *     spd = float(spd_); L = L_; R = R_
+ *     if (L_ + R_) != 0 and abs(spd_) > 0:
+ *         servo_init(0)              # ← 没有 gait(0)
+ *         direct_pose_freeze = False
+ *         inplace_step_end_ms = 0
+ * ```
+ *
+ * ⚠️ **这是进入 WALK 的唯一途径。** `move()` 内部会 `gait(0)`，所以
+ * "先 `gait(1)` 再 `move(...)`" 会被 `move` 立刻改回 TROT ⇒
+ * **用 `move()` 无法让狗以 WALK 步态行走**。原版正是因为这一点才另设
+ * `drive()`，并在参数表里标注"WALK 摇杆用"。
+ *
+ * 这个缺口是在做可视化时发现的：我原来的多帧测试脚本写成 `gait(1)` + `move(...)`，
+ * 画出来四条腿是**对角同步**（TROT）而不是四拍顺序 —— 看图才发现脚本根本没在跑 WALK。
+ */
+void control_chain_cmd_drive(control_chain_cmd_t *c, const control_chain_cfg_t *cfg,
+                             control_chain_state_t *st, float spd, int L, int R);
+
 /** 复刻 `padog.gait(mode)` —— 只有模式变了才 `t=0`，所以需要把状态传进来 */
 void control_chain_cmd_gait(control_chain_cmd_t *c, const control_chain_cfg_t *cfg,
                             control_chain_state_t *st, int mode);

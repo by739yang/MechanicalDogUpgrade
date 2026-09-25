@@ -536,6 +536,7 @@ static void handle_line(char *line)
                strcmp(cmd, "estop") == 0 || strcmp(cmd, "lg") == 0 ||
                strcmp(cmd, "lgtest") == 0 || strcmp(cmd, "readback") == 0 ||
                strcmp(cmd, "gait") == 0 || strcmp(cmd, "jog") == 0 ||
+               strcmp(cmd, "drive") == 0 ||
                strcmp(cmd, "turn") == 0 || strcmp(cmd, "chain") == 0) {
         /* P2/P3：固定周期运动、站姿、行走、急停、单通道映射核对 */
         app_motion_cmd_handle(cmd, args);

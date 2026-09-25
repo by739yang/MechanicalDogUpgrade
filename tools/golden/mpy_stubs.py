@@ -190,6 +190,94 @@ def _make_utime():
     return m
 
 
+# ============================================================================
+#  可控时钟 —— 给"会读 utime.ticks_ms()"的原代码用（姿态动画层）
+# ============================================================================
+#
+# `padog.py` 的纯数学部分（PA_IK / PA_TROT / PA_WALK / servo_output）不读时钟，
+# 所以 `_make_utime()` 用真实时钟就够了。但**姿态动画层**不一样：
+#   `_pose_anim_begin()` / `_pose_anim_step()` 读 `utime.ticks_ms()`，
+#   `_wait_pose_anim_done()` 还会 `while pose_anim_active: mainloop(); time.sleep_ms(20)`，
+#   `mainloop()` 开头的 `inplace_step_end_ms` 服务也要比时刻。
+#
+# 用真实时钟会同时踩两个坑：
+#   1. 参考值**不可复现** —— 插值系数 `t = (now-start)/total` 每次都不一样；
+#   2. `_wait_pose_anim_done()` 会真的睡 900 ms 甚至更久，golden 生成变得很慢。
+#
+# 为什么钉住时钟**仍然忠实**：原代码只用 `ticks_ms()` / `ticks_add()` / `ticks_diff()`
+# 三个操作，语义是"单调递增的整数毫秒 + 环绕安全的差值"。下面这个假时钟给出的
+# 就是同样的语义，而且把真实休眠的抖动去掉了 —— 板子上真正的 tick 序列是
+# `t0, t0+20, t0+40, ...`，假时钟给出的正是这个序列的**标称值**。
+# 被测代码里没有任何"依赖真实流逝时间"的逻辑（除 sleep 本身），所以这是
+# **更强的可复现性**，不是更弱的忠实度。
+#
+# 与板子唯一的差别：MicroPython 的 `ticks_ms()` 会在 2^30 附近回绕，这里不回绕。
+# 测试模拟的总时长只有几秒、起点固定在 10 万毫秒级，**回绕路径不可达**
+# （原代码也不会跨过它）。
+
+
+class ControllableClock:
+    """假时钟：`ticks_ms()` 返回一个由生成器**显式推进**的整数毫秒计数。"""
+
+    def __init__(self, now_ms=0):
+        self.now_ms = int(now_ms)
+
+    def set(self, now_ms):
+        self.now_ms = int(now_ms)
+
+    def advance(self, ms):
+        self.now_ms += int(ms)
+
+    def ticks_ms(self):
+        return self.now_ms
+
+    def ticks_us(self):
+        return self.now_ms * 1000
+
+    def sleep_ms(self, ms):
+        self.advance(ms)
+
+    def sleep_us(self, us):
+        self.advance(int(us) // 1000)
+
+    def sleep(self, s):
+        self.advance(int(round(float(s) * 1000.0)))
+
+
+def install_controllable_clock(now_ms=0):
+    """
+    把 `sys.modules['utime']` 换成可控时钟，并给 CPython 的 `time` 补上 `sleep_ms()`。
+
+    两处 monkeypatch 的理由：
+
+    * `sys.modules['utime']` —— `padog.py` 顶层 `import utime`，拿到的是
+      `sys.modules` 里那**一个**对象；换掉它，`ns['utime']` 就是假时钟。
+      （`install_for_mainloop()` 只在名字不存在时才建 `utime`，所以不会被覆盖。）
+    * `time.sleep_ms` —— 原代码写的是 `time.sleep_ms(20)`，MicroPython 的 `time`
+      有这个方法（CPython 没有；`install_for_servo()` 只补了 `sleep_us`）。
+      必须让它**推进同一个时钟**，否则 `_wait_pose_anim_done()` 的循环会
+      要么立刻跑完（不推进时间 → 死循环或次数不对）、要么真的睡 900 ms。
+
+    ⚠️ 必须**在 `load_padog_ns()` 之前**调用。
+    """
+    clock = ControllableClock(now_ms)
+
+    m = types.ModuleType("utime")
+    m.ticks_ms = clock.ticks_ms
+    m.ticks_us = clock.ticks_us
+    m.ticks_add = lambda a, b: a + b
+    m.ticks_diff = lambda a, b: a - b
+    m.sleep_ms = clock.sleep_ms
+    m.sleep_us = clock.sleep_us
+    m.sleep = clock.sleep
+    sys.modules["utime"] = m
+
+    import time as _t
+    _t.sleep_ms = clock.sleep_ms
+    _t.sleep = clock.sleep
+    return clock
+
+
 def _make_mech_arm():
     """机械臂：mainloop 里调它的 tick()，与运动数学无关。"""
     m = types.ModuleType("mech_arm")

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * test_control_chain_cmd.c —— 宿主侧 golden 测试：多帧序列（P3）
  *
  * 单帧对照（test_control_chain.c）每行都是"干净初值 + 跑一帧"，
@@ -33,7 +33,8 @@
 #define CMD_MAX    256
 
 /* 动作编号，与 gen_golden.py 的 CHAIN_SEQ_ACTION_CODES 一致 */
-enum { ACT_MOVE = 0, ACT_GAIT = 1, ACT_HEIGHT = 2, ACT_GESTURE = 3, ACT_SET_TURN = 4 };
+enum { ACT_MOVE = 0, ACT_GAIT = 1, ACT_HEIGHT = 2, ACT_GESTURE = 3, ACT_SET_TURN = 4,
+       ACT_DRIVE = 5 };
 
 typedef struct {
     int   seq;
@@ -109,6 +110,10 @@ static void apply_cmds(int seq, int frame,
             break;
         case ACT_SET_TURN:
             control_chain_cmd_set_turn(cmd, (float)c->a[0]);
+            break;
+        case ACT_DRIVE:
+            /* drive() = move() 去掉 gait(0) ⇒ 进入 WALK 的唯一途径（P-26） */
+            control_chain_cmd_drive(cmd, cfg, st, (float)c->a[0], (int)c->a[1], (int)c->a[2]);
             break;
         default:
             fprintf(stderr, "ERROR: unknown action %d\n", c->action);

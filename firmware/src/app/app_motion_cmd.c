@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file    app_motion_cmd.c
  * @brief   P2 串口控制台命令实现
  */
@@ -37,7 +37,8 @@ void app_motion_cmd_help(void)
     ESP_LOGI(TAG, "  stand                        站姿（走控制链 = 原版真正的站姿）");
     ESP_LOGI(TAG, "  stand direct                 标定用站姿（12 路 = 中位角，见 E8）");
     ESP_LOGI(TAG, "  gait trot|walk               选步态（chain 模式）");
-    ESP_LOGI(TAG, "  jog <spd> <L> <R>            行走命令，如 jog -3 1 1（前进）");
+    ESP_LOGI(TAG, "  jog <spd> <L> <R>            行走命令（= 原版 move()，会切回 TROT）");
+    ESP_LOGI(TAG, "  drive <spd> <L> <R>          行走命令（= 原版 drive()，不切步态）");
     ESP_LOGI(TAG, "  turn <pct>                   横杆转向百分比（|pct|>=10 才生效）");
     ESP_LOGI(TAG, "  chain                        打印控制链状态（相位/目标/角度）");
     ESP_LOGI(TAG, "  estop [reason]               急停：12 路松力并停任务");
@@ -221,6 +222,35 @@ static void cmd_jog(const char *args)
         ESP_LOGW(TAG, "当前是 POSE 模式 —— 请先 `motion mode chain`，否则命令不生效");
     }
     ESP_LOGI(TAG, "jog: spd=%.3f L=%d R=%d", (double)spd, L, R);
+}
+
+/**
+ * `drive` —— 与 `jog` 只差一点：**不切步态**。
+ *
+ * ⚠️ 这是让狗以 **WALK** 走路唯一可行的一条路：`jog` 对应原版 `move()`，
+ * 而 `move()` 内部会 `gait(0)` 把步态改回 TROT。
+ * 用法：`motion mode chain` → `gait walk` → `drive -2 1 1`。
+ */
+static void cmd_drive(const char *args)
+{
+    float spd = 0.0f;
+    int L = 0, R = 0;
+    if (sscanf(args, "%f %d %d", &spd, &L, &R) < 1) {
+        ESP_LOGE(TAG, "用法: drive <spd> [L] [R]   例: drive -2 1 1（WALK 前进）");
+        return;
+    }
+    const esp_err_t err = app_chain_drive(spd, L, R);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "drive 失败: %s", esp_err_to_name(err));
+        return;
+    }
+    app_chain_status_t cs;
+    app_chain_get_status(&cs);
+    ESP_LOGI(TAG, "drive: spd=%.3f L=%d R=%d（步态保持 %s）",
+             (double)spd, L, R, (cs.gait_mode == 0) ? "TROT" : "WALK");
+    if (motion_get_mode() != MOTION_MODE_CHAIN) {
+        ESP_LOGW(TAG, "当前是 POSE 模式 —— 请先 `motion mode chain`");
+    }
 }
 
 static void cmd_turn(const char *args)
@@ -441,6 +471,8 @@ void app_motion_cmd_handle(const char *cmd, const char *args)
         cmd_gait(args);
     } else if (strcmp(cmd, "jog") == 0) {
         cmd_jog(args);
+    } else if (strcmp(cmd, "drive") == 0) {
+        cmd_drive(args);
     } else if (strcmp(cmd, "turn") == 0) {
         cmd_turn(args);
     } else if (strcmp(cmd, "chain") == 0) {

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file    app_chain.h
  * @brief   把 `control_chain`（原版 `mainloop()` 的一帧）接到固件上的应用层封装
  *
@@ -110,6 +110,18 @@ esp_err_t app_chain_set_gait(int gait_mode);
  *         （原版 `gait(0)` 只在模式真的变了时才 `t=0`）。
  */
 esp_err_t app_chain_jog(float spd, int L, int R);
+
+/**
+ * @brief 行走命令（**不切步态**）—— 复刻 `padog.drive(spd, L, R)`。
+ *
+ * ⚠️ **这是让狗以 WALK 步态行走的唯一途径。** `app_chain_jog()` 对应原版
+ * `move()`，而 `move()` 内部会 `gait(0)` 把步态改回 TROT ⇒
+ * "先 `gait 1` 再 `jog`" 永远走不出 WALK。原版为此专门设了 `drive()`
+ * （参数表里标注"WALK 摇杆用"，即网页的 WALK 摇杆走这条路）。
+ *
+ * 用法：`motion mode chain` → `gait walk` → `drive -2 1 1`。
+ */
+esp_err_t app_chain_drive(float spd, int L, int R);
 
 /** @brief 横杆转向百分比（`|pct| >= 10` 时髋角才参与转向） */
 esp_err_t app_chain_set_joy_turn(float pct);

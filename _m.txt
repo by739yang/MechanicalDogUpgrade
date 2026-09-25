@@ -1,0 +1,37 @@
+P3-7: gait visualizer, and two real findings it produced (P-26/P-27)
+
+Adds tools/viz/: dump_chain_trace.c exports each frame's 12 angles plus the
+per-leg foot targets actually fed to the IK (trustworthy because control_chain
+is pinned frame-by-frame by the golden), and make_viz.py turns that into a
+self-contained HTML viewer -- gait diagram (swing/stance bars per leg), two
+side-view leg animations, and foot-height curves, with play/pause and a
+scrubbable timeline.  No board and no install needed: open the file.
+
+Drawing the legs immediately exposed two problems that numeric comparison was
+completely silent about.
+
+P-26: seq 2 was supposed to exercise WALK but the script did gait(1) then
+move(...), and move() calls gait(0) internally -- so it had been running TROT
+all along.  The golden passed because the reference ran the same script.  Worse,
+this revealed that the C port had NO way to walk in WALK mode at all: the
+original has a separate drive() for exactly this ("WALK joystick, does not
+change gait_mode") and only move() had been ported.  Added
+control_chain_cmd_drive() (shares set_spd_lr() with move, differing only in the
+gait(0) call), app_chain_drive(), and a `drive` console command.  The
+regenerated golden still matches 820/820.
+
+P-27: the script interpreter existed twice (comparison test and trace dumper),
+and adding the new action code only updated one copy -- the dumper's enum
+stopped at 4 and the new code 5 fell into its default branch, silently ignored,
+so the dump had speed 0 and the picture showed a WALK that never lifts a leg.
+Factored into a single header-only chain_seq_script.h used by both, and unknown
+action codes now count and report instead of being swallowed.  Second
+occurrence of "the same thing written twice" (P-22 was the hand-filled cs
+column).
+
+The phase report is numeric rather than visual on purpose: it caught two bugs in
+my own swing detector (first an inverted ground reference, then a global
+baseline that misread the roll-induced offset as permanent leg lift).  With a
+sliding +/-10 frame local baseline the data reads correctly: TROT shows diagonal
+pairs on a 15.4-frame (1.0 s) cycle, and WALK shows the legs lifting in the
+order 1-2-3-4.

@@ -67,6 +67,33 @@ void control_chain_cmd_gait(control_chain_cmd_t *c, const control_chain_cfg_t *c
     }
 }
 
+/** `move()` 与 `drive()` 共用的部分：spd/L/R + 条件性的 `servo_init(0)` */
+static void set_spd_lr(control_chain_cmd_t *c, control_chain_state_t *st,
+                       float spd, int L, int R)
+{
+    c->spd = spd;
+    c->L = L;
+    c->R = R;
+    if ((L + R) != 0 && fabsf(spd) > 0.0f && st != NULL) {
+        st->init_case = 0;   /* servo_init(0) */
+    }
+}
+
+void control_chain_cmd_drive(control_chain_cmd_t *c, const control_chain_cfg_t *cfg,
+                             control_chain_state_t *st, float spd, int L, int R)
+{
+    (void)cfg;   /* drive() 不碰目标，也不需要 cfg */
+    if (c == NULL) {
+        return;
+    }
+    /*
+     * padog.drive(spd_, L_, R_)：与 move() **只差一句 `gait(0)`**。
+     * 注释原文："仅更新 spd/L/R（WALK 摇杆用，不切 gait_mode）"
+     * ⇒ WALK 只能走这条路进来；用 move() 会被它内部的 gait(0) 改回 TROT。
+     */
+    set_spd_lr(c, st, spd, L, R);
+}
+
 void control_chain_cmd_move(control_chain_cmd_t *c, const control_chain_cfg_t *cfg,
                             control_chain_state_t *st, float spd, int L, int R)
 {
@@ -85,16 +112,13 @@ void control_chain_cmd_move(control_chain_cmd_t *c, const control_chain_cfg_t *c
      * ⚠️ 关键：`L=R=0` 或 `spd=0` 时**只**改 spd/L/R，**不动**目标与相位。
      *    所以 `move(0,0,0)` 之后目标还是之前的值（可能被 WALK 的 gesture 改过），
      *    站位由 mainloop 自己把 `t` 归零（`L==0 and R==0` 那一支）。
-     *    第一版 `app_chain_jog` 在这里无条件 `t=0`，会让行进中推摇杆时相位跳变。 */
-    c->spd = spd;
-    c->L = L;
-    c->R = R;
+     *    第一版 `app_chain_jog` 在这里无条件 `t=0`，会让行进中推摇杆时相位跳变。
+     *
+     * ⚠️ 也正因为这里有 `gait(0)`，**用 move() 无法进入 WALK** —— 见 drive()。 */
+    set_spd_lr(c, st, spd, L, R);
 
     if ((L + R) != 0 && fabsf(spd) > 0.0f) {
         gait_apply(c, cfg, st, 0);
-        if (st != NULL) {
-            st->init_case = 0;   /* servo_init(0) */
-        }
     }
 }
 

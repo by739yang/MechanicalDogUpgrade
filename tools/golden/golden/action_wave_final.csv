@@ -1,0 +1,3 @@
+# padog.action_wave_direct() 结束状态 golden
+# 列: t_off,n_groups,n_writes,pose_anim_active,pose_anim_hold_freeze,direct_pose_freeze,anim_start_off,anim_end_off,inplace_step_end_ms,crawl_phase,gait_mode,t,spd,L,R,H_goal,R_H,PIT_goal,ROL_goal,X_goal,front_y,rear_y,init_case
+3400,54,565,1,0,1,3400,4300,0,0,0,0,0.000000,0,0,86,86,0,0,18,0,0,0
