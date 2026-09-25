@@ -1,4 +1,4 @@
-﻿# tools/golden —— 宿主侧 golden 对照测试
+# tools/golden —— 宿主侧 golden 对照测试
 
 **目的**：把 MicroPython 参考实现和 C 移植版**逐数值对照**，替代"靠肉眼看数字"。
 
@@ -479,13 +479,15 @@ python check_mpy_loadable.py
 | `app_config.c` | `config.py` / `config_s.py` | ✅ 通过（108 条行为检查；NVS 持久化在真机验证） |
 | `servo_map.c` | `PA_SERVO.py` + `padog.servo_output()` | ✅ 通过（284 + 720 = **1004 项精确相等**） |
 | `control_chain.c` | `padog.py` 的 `mainloop()` | ✅ 通过（**1080 组精确相等**，参考值 = 原版 mainloop 真跑） |
+| `control_chain_cmd.c` | `padog.py` 的 `mainloop()` **连跑** | ✅ 通过（**820 帧 / 9840 组精确相等**，覆盖跨帧延续与命令语义） |
+| `action.c` | `padog.py` 的动作/姿态层 | ✅ 通过（姿态表 / 混合 / 直写 + 入口 + 挥手脚本；**角度**与 22 个全局量的后置值都比对） |
+| `app_chain` / `motion` / `servo_out` / `drv_pca9685` | —（App 层状态机） | ✅ 通过（`test_motion_app`：宿主桩 + 可控时钟，37 条断言；见下面"宿主桩层"一节） |
 
-**P3 的控制链已迁移并全链路验证。** 舵机的**物理**通道→关节映射与转向
+**P3 的控制链与动作层都已迁移并宿主验证。** 舵机的**物理**通道→关节映射与转向
 （"ch7 到底是不是右前大腿、正转是抬起还是压下"）只能上机实测，
 见 `../../硬件实物核对清单.md` 阶段 E 与固件的 `lgtest` 命令。
 
-下一步：把 `app_config` 补齐（注入表里还有 18 个字段没进配置结构体）→
-把 `control_chain` 接进固定周期任务 → 加步态控制台命令。
+下一步：把动作层接进固件（控制台命令）→ 把动作也接进可视化 → P5 命令协议 → P6 机械臂。
 
 ## 宿主桩层（`host_stubs/`）—— 连 App 层状态机都能在电脑上跑
 

@@ -1624,49 +1624,49 @@ def main():
 
     total = 0
 
-    print("\n[1/7] PA_IK -> kinematics.c ...")
+    print("\n[1/12] PA_IK -> kinematics.c ...")
     ns_ik = load_module("PA_IK.py")
     with open(OUT / "ik.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_ik(ns_ik, fh)
 
-    print("\n[2/7] PA_ATTITUDE -> body_pose.c ...")
+    print("\n[2/12] PA_ATTITUDE -> body_pose.c ...")
     ns_att = load_module("PA_ATTITUDE.py")
     with open(OUT / "body_pose.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_body_pose(ns_att, fh)
 
-    print("\n[3/7] PA_TROT -> gait_trot.c ...")
+    print("\n[3/12] PA_TROT -> gait_trot.c ...")
     ns_trot = load_module("PA_TROT.py")
     with open(OUT / "gait_trot.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_gait_trot(ns_trot, fh)
 
-    print("\n[4/7] PA_AVGFILT -> filter_moving_avg.c ...")
+    print("\n[4/12] PA_AVGFILT -> filter_moving_avg.c ...")
     ns_flt = load_module("PA_AVGFILT.py")
     with open(OUT / "moving_avg.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_moving_avg(ns_flt, fh)
 
-    print("\n[5/7] PA_WALK -> gait_walk.c ...")
+    print("\n[5/12] PA_WALK -> gait_walk.c ...")
     ns_walk = load_module("PA_WALK.py")
     with open(OUT / "gait_walk.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_gait_walk(ns_walk, fh)
 
     # 最后两个 suite 会把 machine.I2C / machine.Pin 换成"记录型"实现，
     # 所以放在最后，避免影响前面依赖 stub 会抛异常的模块。
-    print("\n[6/7] PA_SERVO -> servo_map.c（角度/占空比路径）...")
+    print("\n[6/12] PA_SERVO -> servo_map.c（角度/占空比路径）...")
     ang, duties = servo_angle_samples()
     with open(OUT / "servo_angle.csv", "w", encoding="utf-8", newline="\n") as fh:
         total += gen_servo_angle(fh, ang, duties)
 
-    print("\n[7/8] padog.servo_output -> servo_map.c（关节角 -> 12 路）...")
+    print("\n[7/12] padog.servo_output -> servo_map.c（关节角 -> 12 路）...")
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         with open(OUT / "servo_output.csv", "w", encoding="utf-8", newline="\n") as fh:
             total += gen_servo_output(fh, servo_output_cases(), tmpdir)
 
-        print("\n[8/9] padog.mainloop() -> control_chain.c（全链路，单帧，P3）...")
+        print("\n[8/12] padog.mainloop() -> control_chain.c（全链路，单帧，P3）...")
         with open(OUT / "control_chain.csv", "w", encoding="utf-8", newline="\n") as fh:
             total += gen_control_chain(fh, control_chain_cases(), tmpdir)
 
-        print("\n[9/9] padog.mainloop() 连跑 -> control_chain_cmd.c（多帧序列，P3）...")
+        print("\n[9/12] padog.mainloop() 连跑 -> control_chain_cmd.c（多帧序列，P3）...")
         with open(OUT / "control_chain_seq.csv", "w", encoding="utf-8", newline="\n") as fh:
             total += gen_control_chain_seq(fh, tmpdir)
 
