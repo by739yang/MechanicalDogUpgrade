@@ -1,4 +1,4 @@
-﻿# firmware —— 机械狗 ESP-IDF C 迁移工程
+# firmware —— 机械狗 ESP-IDF C 迁移工程
 
 > 阶段：**P2 完成**（P0 工程骨架/日志/I2C/PCA9685 + P1 配置 NVS 与纯数学 +
 > P2 固定周期舵机输出）
@@ -156,7 +156,8 @@ off 0
 | `motion period <ms>` | 运动任务周期，默认 10（100 Hz），下一个周期即生效 |
 | `motion rate <deg_per_s>` | 速率上限，默认 120 °/s（**只对 POSE 模式生效**） |
 | `motion timeout <ms>` | 命令超时后松力停车，默认 10000；`0` = 关闭 |
-| `motion mode pose\|chain` | 控制模式：直接 12 路角度 / 走控制链 |
+| `motion mode pose\|chain\|action` | 控制模式：直接 12 路角度 / 控制链（步态）/ 姿态动画 |
+| `action stand\|sit\|sit_direct\|wave\|step\|stop` | 动作：立正 / 坐下 / 直接坐下 / 挥手 / 原地踏步 / 撤销 |
 | `stand` | **原版真正的站姿**（走控制链 `cal_ges`→IK→`servo_output`） |
 | `stand direct` | **标定用站姿**（12 路 = 中位角）—— 两者不同，见下 |
 | `gait trot\|walk` | 选步态（相位 `t` 归零） |
