@@ -231,14 +231,14 @@ while True:
 | `btn_stand` | `action_stand()` | `APP_ACTION_STAND` → `action_stand` | 🟢 有 |
 | `btn_sit` | `action_sit_direct()` | `APP_ACTION_SIT` → `action_sit_direct` | 🟢 有 |
 | `btn_wave` | `action_wave_direct()` | `APP_ACTION_WAVE` → `action_wave_step` | 🟢 有 |
-| `btn_crawl` | `action_crawl()`（`padog.py:810`） | **入口未搬** ⇒ 见 `(5)` | ❌ **缺** |
+| `btn_crawl` | `action_crawl()`（`padog.py:810`） | `APP_ACTION_CRAWL` ✅（**须 CHAIN 模式**，见 `(5)`） | ✅ 已补 |
 | `btn_stop` | `set_joy_turn(0)` + `move(0,0,0)` | `app_chain_jog(0,0,0)` + `app_chain_set_joy_turn(0)` | 🟢 有 |
 | `am1` / `am0` | `mech_arm.set_enabled()` | P6 | ⬜ |
 | `btn_grip_open/close` | `mech_arm.grip_open/close()` | P6 | ⬜ |
 | `l1`–`l4` | `cal_leg_sel = 1..4`（选标定腿） | `app_config.cal_leg_sel` | 🟢 有 |
-| `hi` / `hd` | `init_<n>h ∓ 1` = **大腿**中位角 | `servo_center[n][1]`（`cN_thigh`） | ❌ **缺 ±1 入口** |
-| `si` / `sd` | `init_<n>s ∓ 1` = **小腿**中位角 | `servo_center[n][2]`（`cN_shank`） | ❌ **缺 ±1 入口** |
-| `ip` / `id` | `init_<n>p ∓ 1` = **髋**中位角 | `servo_center[n][0]`（`cN_hip`） | ❌ **缺 ±1 入口** |
+| `hi` / `hd` | `init_<n>h ∓ 1` = **大腿**中位角 | `app_config_nudge_servo_center(JOINT_THIGH, ±1)` | ✅ 已补 |
+| `si` / `sd` | `init_<n>s ∓ 1` = **小腿**中位角 | `app_config_nudge_servo_center(JOINT_SHANK, ±1)` | ✅ 已补 |
+| `ip` / `id` | `init_<n>p ∓ 1` = **髋**中位角 | `app_config_nudge_servo_center(JOINT_HIP, ±1)` | ✅ 已补 |
 | `t9` | `servo_init(1)` = 切"直接站姿" | `app_chain_set_init_case(1)` | 🟢 有 |
 | `sc` | 保存中位角到 `config_s.py` | `cfg save` → `app_config_save()` → NVS（§8.4 要的就是这个替换） | 🟢 有 |
 | `ss` | **清姿态 + 跳转标定页**（**不是停车！**） | 见 `(4)` 决议 | ⚠️ 决议 |
@@ -270,28 +270,52 @@ while True:
    但也因此必须再叠一层更长的超时（如 2 s）才真正放松，避免舵机长期堵转发热。
    两级阈值都要做成显式参数。
 
-### (5) 覆盖这面表还缺的两小块（都不需要板子）
+### (5) 覆盖这面表还缺的两小块（都不需要板子）—— ✅ **两块都补完了**
 
-- **`action_crawl()` 入口**：动作层**故意**没搬它（爬行状态机整个在
-  `control_chain.c`，搬过去会两边抢 `crawl_phase`，见 `control/action.h`）。
-  但 `app_chain_set_crawl()` 已经留好了"爬行命令入口 P5/P6 用"的钩子 ⇒
-  还差一个**入口函数**把 `padog.py:810~831` 那个函数体按顺序表达出来
-  （清 `pose_anim_active`/`direct_pose_freeze`/`inplace_step_end_ms` →
-  `set_joy_turn(0)` → `move(0,0,0)` → `gait(0)` → `servo_init(0)` →
-  `set_leg_sit_offsets(0,0)` → 存 `crawl_saved_h = int(H_goal)`、`R_H = crawl_saved_h`
-  → 快照 `PIT/ROL/X_goal` → 置两个截止时刻 → `crawl_phase = 1`）。
-  所需入口基本都在（`app_chain_set_sit_offsets` / `_set_init_case` /
-  `_set_crawl` / `_gesture`；`H_goal` 可从 `app_chain_get_status().goal[0]` 读回），
-  可以**对着原版做 golden 对照**。
-  ⚠️ 但有一处要**先验证再写**：原版那句是 `R_H = crawl_saved_h = int(H_goal)` ——
-  **只改 `R_H`，不改 `H_goal`**；而 `app_chain_set_height(h)` 会**同时**把
-  `H_goal` 也改成 `h`。如果当时 `H_goal` 不是整数，用 `set_height(int(H_goal))`
-  会**顺手把 `H_goal` 截断**，原版不会。要么确认 `H_goal` 恒为整数，
-  要么补一个只改 `R_H` 的窄接口，**不能默认它没差别**（P-24 那类）。
-- **中位角 ±1 入口**：`cfg` 命令已能读写 `servo_center[4][3]` 全部 12 个值，
-  但标定键是"对当前选中的腿微调 ±1"这个**动作**，需要一个窄接口
-  （读 `cal_leg_sel` 选中腿 → 改对应关节 → 限幅）。**限幅范围必须和 §8.4
-  "越界自动拒绝"一致**，不能无限累加。
+**① `action_crawl()` 入口 —— ✅ 已完成**（`APP_ACTION_CRAWL`，走 STAND/SIT/WAVE
+同一条通道；`test_action_crawl` = **219 checks / 0 failures**，9 行 × 20 列
+零容差状态对照，含 `H_goal` 列）。
+
+⚠️ **我原来在 §0.5(5) 初稿里断言"所需入口全都在"—— 这是错的**，读码求证后：
+原版那句 `R_H = crawl_saved_h = int(H_goal)` **只改 `R_H`、不改 `H_goal`**，
+而 `app_chain_set_height()` 会**同时**写 `goal[H]` 和 `R_H`
+（`control_chain_cmd.c:125~134`）。所以它**是错的入口**。实测证据（生成器自断言）：
+`H_goal=100.5` 时原版给 `crawl_saved_h=100 / R_H=100 / H_goal=100.5`，
+用 `set_height` 会把 `H_goal` 变成 100。故意打断测试里，"换回 `set_height`"
+**只有 `H_goal` 那一列抓到**（`R_H` 照样对）—— 这正是"要把副作用读回来"的意思。
+另外 `crawl_saved_h` 在 C 侧**根本没有写入口**，`CRAWL_SETTLE_MS/CRAWL_DURATION_MS`
+也没有 getter。⇒ 补了这 4 个窄接口：`app_chain_set_r_h`、
+`app_chain_set/get_crawl_saved_h`、`app_chain_get_crawl_ms`。
+
+⚠️ **光有入口爬不起来 —— 还有一个结构性陷阱（已打通）。** `app_chain.c` 原来
+硬编码 `in.crawl_phase = 0`，而 `control_chain_tick()` 结尾会
+`st->crawl_phase = w.crawl_phase` 把状态写回 ⇒ 入口刚设的 `crawl_phase=1`
+**下一帧就被擦掉**，`chain_crawl_service()` 永远不启动，`btn_crawl` 是个**死键**。
+已改成 `in.crawl_phase = s_st.crawl_phase;`。
+（`crawl_until_ms`/`crawl_settle_until_ms`/`crawl_saved_h` 不喂输入是对的：
+链里那三个取自 `st`，只有 `crawl_phase` 走输入。）
+
+⚠️ **`btn_crawl` 要的是 CHAIN 模式，和别的动作相反。** 爬行的**执行**整个在控制链里，
+而 `motion.c` 的模式是**互斥**的（ACTION 模式不调 `app_chain_step()`）。
+⇒ ACTION 模式下点爬行只会"把状态摆好、不推进"。控制台 `action crawl` 已加，
+并且它的模式警告已经**反过来**（提示 `motion mode chain`）。
+⚠️ 这条是 C 版独有的结构问题：原版只有一个 `mainloop()`，
+`action_crawl()` 和 `_crawl_mainloop_service()` 在**同一个循环**里，不存在"模式"。
+
+**② 中位角 ±1 入口 —— ✅ 已完成**：`app_config_nudge_servo_center(cfg, joint, delta, ...)`
+读 `cal_leg_sel` 选中的腿、写 `servo_center[leg][joint]`，然后调**同一个**
+`app_config_validate()`（同一套 0..180 限幅、同一套"改动上报"机制，
+**没有第二套限幅** —— P-22/P-27）。打断测试：把 thigh/shank 两个枚举值对调 →
+`failures=7`，且报错信息明确指出"同一腿的错误关节"和"其它腿的同一关节"被误改。
+字母→关节的映射已写进 `app_config.h` 的 `app_cfg_joint_t` 注释，防止下一个人再猜。
+
+⚠️ **但微调改了不会立刻生效（未接的最后一环）**：`servo_center` 的两个消费者
+（`app_action_init()` 与 `app_chain_init/reload_cfg()`）**各自留了副本**，
+而运行时**没有任何地方重载**（`cfg set` 只校验；`app_chain_reload_cfg()` 
+目前**无人调用**）。⇒ 想让微调/`cN_*` 生效，必须调
+`app_chain_reload_cfg()` **并且** `app_action_init()`。这属于接线工作
+（`app_cfg_cmd.c` 或 P5 协议层），**已记录、未接线**。
+原版对应行为：`sc` 会写文件并 `servo_init(0)`，下次 mainloop 用新的 `init_*`。
 
 ### (6) 动作期间的行为：C 版**故意**与原版不同，必须写成显式规则
 
@@ -307,9 +331,14 @@ while True:
 `while True` 里（见 `(2)`），所以**连 HTTP 都不应答**，浏览器的轮询请求全在排队。
 
 C 版把 `time.sleep_ms()` 变成输出参数 `delay_ms`、把阻塞循环变成状态机
-（`action_wave_step()` 一次推进一步），动作层**一次都不阻塞** ——
-`firmware/src` 里除了 PCA9685 复位（`drv_pca9685.c` 两处 1 ms）和控制台命令，
-**没有 `vTaskDelay`**，可以 grep 复查。
+（`action_wave_step()` 一次推进一步），而 `delay_ms` 由动作层自己转成
+**绝对时刻**再和 `now` 比较（`app_action.c:497` / `:512`
+`s_wave_next_ms = now + ws.delay_ms`）⇒ 那 3.4 秒是**跨很多帧自然流逝**的，
+**动作层一次都不阻塞**。
+（准确地说：运动环里唯一的"阻塞"是控制任务自己的周期
+`vTaskDelayUntil`（`motion.c:523`）和停车时等任务退出的
+`vTaskDelay(10)`（`motion.c:637`，在停车路径里，不在环内）——
+**没有哪一处是为了"等动作演完"而睡的**。这一条可以 grep 复查。）
 
 ⇒ 这是**有意分歧，不是漏搬**：§8.1 明确要求把网页服务移出运动主循环，
 搬完必然产生这个差别。但差别本身必须变成明文规则，否则现场会出现
@@ -395,6 +424,18 @@ C 版把 `time.sleep_ms()` 变成输出参数 `delay_ms`、把阻塞循环变成
 ⇒ 这一层是**纯逻辑、零外设**，可以完整做 golden 对照，**不需要板子**。
 它比"协议怎么切字节"重要得多：切错了狗不动，这层错了狗**乱动**。
 
+分发侧的三个细节（`web_ctl.py:63~74`，权威）：
+
+- 一条请求里**四件事按固定顺序**处理：`handle_control_key` →
+  `process_arm_from_req` → `process_grip_from_req` → 狗摇杆。
+  前两个没有 `jy=`/`grip=` 时会自己 return，所以**不会互相干扰**；
+- **狗摇杆只在请求里含 `f=` 时才处理**（`if req_data.find('f=') >= 0`）。
+  即"只发 `key=`"的按键请求**不会顺手把狗停下**；
+- 轻量页传的是 **`dog_when_arm=True`** ⇒ 机械臂开着时**仍然能控狗**
+  （`apply_dog_stick` 的 `force` 参数就是为它设的；P6 接线时必须保留这个标志）。
+- 数据请求回 **204 No Content + keep-alive**，只有要页面时才回 HTML
+  （`_wants_page()`）—— C 服务端要么照抄这个分流，要么直接上 WebSocket。
+
 ### (9) 现有网页客户端的真实报文格式（决定 C 服务端要"吃什么"）
 
 `drive.html` 发的**不是**标准 query string：
@@ -424,6 +465,12 @@ r.open("GET","f="+dy+"t="+dx)       // 108：同上
 ⚠️ **单位要照抄**：`f`/`t` 是 **-100..100 的百分比**，不是内部的 `thr`；
 `grip` 也是百分比（`mech_arm.set_grip_pct`）。全部缩放、死区、取负
 都在 `(8)` 那一层做，**协议层不许顺手帮它换算** —— 换算写两处必然有一处错。
+
+3. **`mode` 是"可选键"，不是必填键。** §3 那句"命令中必须包含……模式字段"
+   针对的是**新格式的命令**；老页面（`drive.html`）根本不发 `mode`。
+   所以键表要区分两类：**必填**（如 `seq`/`t`，缺失即整帧拒绝）与
+   **可选**（缺失就沿用当前值，但**一旦出现就必须过白名单和范围校验**）。
+   `mode` 归第二类 —— 否则等于把用户手上唯一能实测的页面判死。
 
 ## 1. 当前 MicroPython 控制链
 
