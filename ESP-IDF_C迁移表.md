@@ -186,6 +186,245 @@ config 文件里没有的键，全部由这张表兜底。**它才是"出厂默�
 golden 是逐行单帧对照，**结构上测不出这个差别**，只能靠接口文档约束。
 
 
+## 0.5 P5 命令面逐条对照（2026-09-19 读码后确认，取代"按 web_c.py 猜"）
+
+### (1) 权威来源不是 `web_c.py`，而是 `web_common.py`
+
+`web_c.py` 是旧版：它把整个 query string 塞给 **`exec()`**（第 303 行
+`exec(req_data.replace('&',';'))`），并靠 `exec("padog.init_"+user_leg_num+"h=...")`
+拼字符串改标定值。学长的**重构版** `web_common.py` 已经带上了
+`CTL_KEYS` 白名单 + `handle_control_key()` 分发 —— 那才是"原版想表达的命令语义"。
+⇒ C 版以 `web_common.py` 为准，`web_c.py` 只用来补它没覆盖的标定键。
+
+### (2) 原版传输层的真实缺陷（P5 的验收点就来自这里）
+
+`web_c.py:266` 是**阻塞式单客户端 HTTP GET 轮询**：
+
+```python
+while True:
+  cl, addr = s.accept()      # ← 永久阻塞，没有 timeout
+  raw = cl.recv(1024)        # ← 一次读，不保证读全
+  ...
+  exec(...)                  # ← 直接执行请求参数
+```
+
+- **完全没有断连检测**：浏览器一关，`accept()` 继续等，狗带着最后一组 `spd/L/R`
+  **一直走下去**。这是原版最严重的安全缺口。
+- **没有序号**：18 个并发 GET 的到达顺序不保证，旧命令可能覆盖新命令。
+- 控制与页面生成在同一个循环里（`_send_full_page`），§8.1/8.6 要拆开。
+
+⇒ `seq` + 心跳超时不是为了"更优雅"，是为了补一个**真实存在的**安全漏洞。
+
+### (3) 逐键对照表
+
+`f`/`t` = 四足摇杆（`JOY_THR_MAX=6.0`、`JOY_THR_MIN=-3.0`、死区 10/20），
+`jy`/`jx`/`gp` = 机械臂，其余是按键。**"C 侧对应"栏写的是本工程已有的入口，
+不是计划。**
+
+| 原版键 | 原版语义（读码确认） | C 侧对应 | 状态 |
+|---|---|---|---|
+| `f` / `t` | 前后 + 转向摇杆 | `app_chain_jog` / `app_chain_drive` + `app_chain_set_joy_turn` | 🟢 有 |
+| `g0` | `stable(False)` + `gait(0)` = TROT | `app_chain_set_gait(0)` | 🟢 有 |
+| `g1` | `stable(False)` + `gait(1)` = WALK | `app_chain_set_gait(1)` | 🟢 有 |
+| `go` / `gc` | `stable(True/False)` 陀螺仪闭环 | **无 IMU** ⇒ 见 `(4)` 决议 | ⚠️ 决议 |
+| `is` | `gait(0)` + `inplace_step_end_ms = now+5000` | `APP_ACTION_INPLACE_STEP`（`app_action.c:360/445`） | 🟢 有 |
+| `btn_stand` | `action_stand()` | `APP_ACTION_STAND` → `action_stand` | 🟢 有 |
+| `btn_sit` | `action_sit_direct()` | `APP_ACTION_SIT` → `action_sit_direct` | 🟢 有 |
+| `btn_wave` | `action_wave_direct()` | `APP_ACTION_WAVE` → `action_wave_step` | 🟢 有 |
+| `btn_crawl` | `action_crawl()`（`padog.py:810`） | **入口未搬** ⇒ 见 `(5)` | ❌ **缺** |
+| `btn_stop` | `set_joy_turn(0)` + `move(0,0,0)` | `app_chain_jog(0,0,0)` + `app_chain_set_joy_turn(0)` | 🟢 有 |
+| `am1` / `am0` | `mech_arm.set_enabled()` | P6 | ⬜ |
+| `btn_grip_open/close` | `mech_arm.grip_open/close()` | P6 | ⬜ |
+| `l1`–`l4` | `cal_leg_sel = 1..4`（选标定腿） | `app_config.cal_leg_sel` | 🟢 有 |
+| `hi` / `hd` | `init_<n>h ∓ 1` = **大腿**中位角 | `servo_center[n][1]`（`cN_thigh`） | ❌ **缺 ±1 入口** |
+| `si` / `sd` | `init_<n>s ∓ 1` = **小腿**中位角 | `servo_center[n][2]`（`cN_shank`） | ❌ **缺 ±1 入口** |
+| `ip` / `id` | `init_<n>p ∓ 1` = **髋**中位角 | `servo_center[n][0]`（`cN_hip`） | ❌ **缺 ±1 入口** |
+| `t9` | `servo_init(1)` = 切"直接站姿" | `app_chain_set_init_case(1)` | 🟢 有 |
+| `sc` | 保存中位角到 `config_s.py` | `cfg save` → `app_config_save()` → NVS（§8.4 要的就是这个替换） | 🟢 有 |
+| `ss` | **清姿态 + 跳转标定页**（**不是停车！**） | 见 `(4)` 决议 | ⚠️ 决议 |
+
+⚠️ **命名陷阱（差点又按名字猜）**：原版三个字母与"髋/大/小"**不是**直觉对应。
+`web_c.py:230` 的页面标签是权威：
+
+```
+1左前 髋：init_1p   大：init_1h   小：init_1s
+```
+
+且 `padog.py:508~510` 是 `angle(0, init_1p)` / `angle(1, init_1h)` /
+`angle(2, init_1s)` ⇒ 与 `servo_center[n][0]=髋 / [1]=大腿 / [2]=小腿`
+**顺序完全一致**，只是原版用 `p/h/s` 三个字母。即 **`h` 是"大"，不是"髋"**。
+（P-24 的教训：别按名字/锚定 grep 猜，去读真正定义它的那一行。）
+
+### (4) 三条**必须显式决定**、不能默认糊过去的地方
+
+1. **`go`/`gc`（`stable()`）在没有 IMU 时必须明确失败。** §8.7 专门写了
+   "`stable()` 不能只是一个无效的布尔开关"。C 版收到 `go` 应回一条
+   **"不支持：无 IMU"** 并让上层能看到，**不能**返回"成功"却什么也没做 ——
+   否则就是 §8.7 禁止的那个假开关，只是从 Python 搬到了协议层。
+2. **`ss` 不是停车。** 它是"Pitch=0; Roll=0; `stable(False)`; `gait(0)` + 进标定页"。
+   C 版没有"页面状态"，应实现为**清姿态那三件事**并回一个"进入标定"标志，
+   **绝不能当成 `btn_stop`** —— 这两个键在名字上毫无提示。
+3. **心跳超时用 `btn_stop` 的语义，不用 `estop` 的语义。**
+   `btn_stop` 是"输入归零、保持姿态"（狗还站着）；`estop`/`motion stop` 是放松舵机
+   （四足无力会塌）。断网时人不在旁边，**保持姿态**比"松掉让它趴下"更可控；
+   但也因此必须再叠一层更长的超时（如 2 s）才真正放松，避免舵机长期堵转发热。
+   两级阈值都要做成显式参数。
+
+### (5) 覆盖这面表还缺的两小块（都不需要板子）
+
+- **`action_crawl()` 入口**：动作层**故意**没搬它（爬行状态机整个在
+  `control_chain.c`，搬过去会两边抢 `crawl_phase`，见 `control/action.h`）。
+  但 `app_chain_set_crawl()` 已经留好了"爬行命令入口 P5/P6 用"的钩子 ⇒
+  还差一个**入口函数**把 `padog.py:810~831` 那个函数体按顺序表达出来
+  （清 `pose_anim_active`/`direct_pose_freeze`/`inplace_step_end_ms` →
+  `set_joy_turn(0)` → `move(0,0,0)` → `gait(0)` → `servo_init(0)` →
+  `set_leg_sit_offsets(0,0)` → 存 `crawl_saved_h = int(H_goal)`、`R_H = crawl_saved_h`
+  → 快照 `PIT/ROL/X_goal` → 置两个截止时刻 → `crawl_phase = 1`）。
+  所需入口基本都在（`app_chain_set_sit_offsets` / `_set_init_case` /
+  `_set_crawl` / `_gesture`；`H_goal` 可从 `app_chain_get_status().goal[0]` 读回），
+  可以**对着原版做 golden 对照**。
+  ⚠️ 但有一处要**先验证再写**：原版那句是 `R_H = crawl_saved_h = int(H_goal)` ——
+  **只改 `R_H`，不改 `H_goal`**；而 `app_chain_set_height(h)` 会**同时**把
+  `H_goal` 也改成 `h`。如果当时 `H_goal` 不是整数，用 `set_height(int(H_goal))`
+  会**顺手把 `H_goal` 截断**，原版不会。要么确认 `H_goal` 恒为整数，
+  要么补一个只改 `R_H` 的窄接口，**不能默认它没差别**（P-24 那类）。
+- **中位角 ±1 入口**：`cfg` 命令已能读写 `servo_center[4][3]` 全部 12 个值，
+  但标定键是"对当前选中的腿微调 ±1"这个**动作**，需要一个窄接口
+  （读 `cal_leg_sel` 选中腿 → 改对应关节 → 限幅）。**限幅范围必须和 §8.4
+  "越界自动拒绝"一致**，不能无限累加。
+
+### (6) 动作期间的行为：C 版**故意**与原版不同，必须写成显式规则
+
+原版 `action_wave_direct()` 是一串**阻塞**调用，其中 `_wait_pose_anim_done()`
+是 `46 × [mainloop() + time.sleep_ms(20)]`（这个 46 已经被 golden 钉住，
+见 `firmware/src/control/action.h:525`）。于是挥手期间：
+
+```
+920 + 420 + 300 + 3×(260+260) + 200  =  3400 ms
+```
+
+**整整 3.4 秒整条 `mainloop()` 停转** —— 而且服务端和 mainloop 在同一个
+`while True` 里（见 `(2)`），所以**连 HTTP 都不应答**，浏览器的轮询请求全在排队。
+
+C 版把 `time.sleep_ms()` 变成输出参数 `delay_ms`、把阻塞循环变成状态机
+（`action_wave_step()` 一次推进一步），动作层**一次都不阻塞** ——
+`firmware/src` 里除了 PCA9685 复位（`drv_pca9685.c` 两处 1 ms）和控制台命令，
+**没有 `vTaskDelay`**，可以 grep 复查。
+
+⇒ 这是**有意分歧，不是漏搬**：§8.1 明确要求把网页服务移出运动主循环，
+搬完必然产生这个差别。但差别本身必须变成明文规则，否则现场会出现
+"原版不会发生、C 版会发生"的操作（这正是最容易被当成 bug 的那类现象）：
+
+1. **动作进行中收到运动命令怎么办？** 原版根本处理不到（那 3.4 s 是死区）。
+   C 版规定：**动作期间忽略 `f`/`t` 摇杆和 `g0`/`g1` 步态切换**，
+   但**急停永远有效** —— §7 要求急停 <100 ms，不能被动作挡住。
+2. **心跳超时正好落在动作中途怎么办？** 客户端按 80 ms 轮询时心跳一直是新鲜的，
+   正常不会触发；但浏览器卡一下就会把挥手**打断在半途**，狗停在
+   "前腿抬着、后腿站着"的中间姿态上。规定：**动作期间的心跳超时只表示
+   "不再接受新的运动命令"，不硬停动作**；动作按自己的时序走完后再回安全姿态。
+   超时阈值和这条规则都做成**显式参数**，不要藏在代码里。
+3. 上面的 46 帧在 C 版是"等动画"阶段；`motion.c` 已经会处理"这一帧动作
+   没有产生角度"的情况（`motion.h:88`）。这一条**已经被 golden 覆盖**
+   （`golden/action_wave.csv` 的 `t_off` 列），不需要新测试。
+
+### (7) 命令队列的语义（§3 只定了原则，这里定**取值**）
+
+§3「通信队列原则」已经说了"只取最新、不执行过期、超时停车"。落到 C 上还有
+几个不直觉的决定，先定死，实现就是机械劳动：
+
+| 决定 | 取值 | 理由（一句话） |
+|---|---|---|
+| 队列形态 | **单槽邮箱**，不是 FIFO | §3 要"只取最新"；FIFO 会让运动任务追着积压的旧命令跑，那正是原版 GET 轮询抖动的成因 |
+| 写者 / 读者 | `comm_task` 写、`motion_task`（100 Hz）读 | §3 第 1 条；§7 要求急停 <100 ms ⇒ 读者周期必须远小于阈值 |
+| 并发 | 邮箱自带锁；写者覆盖、读者取走 | 只保护一个结构体，临界区极短 |
+| `seq` | **严格递增**才接受，用回绕安全比较（不能写 `a > b`）| 丢弃重复/重放/乱序，并计数 |
+| 新鲜度 | `now - rx_ms <= 阈值`；阈值取 200~300 ms，**做成配置项** | §7 |
+| 读到过期帧 | **不硬停**，只让读者知道"这是旧的" | 见 `(6)` 第 2 条：动作中途不能被打断 |
+| 急停 | **旁路新鲜度**；且要能从帧里无条件读出来 | §7 要求急停独立于 Web 任务、<100 ms |
+| 超时分两级 | 短超时（200~300 ms）→ 输入归零、**保持姿态**（= `btn_stop` 语义）；长超时（如 2 s）→ **放松舵机** | 见 `(4)` 第 3 条。两级都必须是显式参数 |
+| 可观测 | 接受/丢弃/过期/坏帧**四个计数可读回**（控制台 + 遥测）| 否则"断连自动停车"在真机上**没法证明**，只能宣称 |
+
+⚠️ 最后一行是这一阶段最容易糊弄过去的地方：`seq` 丢弃、心跳超时、断连停车
+这三件事如果只写"实现了"，现场无法区分"真的停了"和"恰好没有新命令"。
+⇒ **计数必须能被读出来**，并且宿主测试要断言计数确实在涨。
+
+### (8) ⚠️ P5 最大的缺口：整套"网页请求 → 机器人命令"的翻译层**没搬**
+
+协议解析（字节/键值）只是入口，原版真正决定"狗怎么动"的是
+`web_common.py` 里这四层。**逐条查过，C 侧一个都没有**：
+
+| 原版函数 | 行 | 作用 | C 侧 |
+|---|---|---|---|
+| `_joy_f_to_thr(vf)` | 70 | 摇杆百分比 → `thr`：`\|vf\|<10`→0；`thr = vf*6.0/100`；再 `*= joy_fwd_sign`（=**-1**）；夹到 `[-3.0, 6.0]` | ❌ 缺 |
+| `_thr_is_forward/backward(thr)` | 86/95 | `joy_fwd_sign<0` 时 **thr<0 才算前进**（阈值 0.35）；符号为 +1 时相反 | ❌ 缺 |
+| `apply_dog_stick(thr, turn, force)` | 111 | 见下 | ❌ 缺 |
+| `process_dog_from_req(...)` | 142 | 见下 | ❌ 缺 |
+| `parse_dog_stick` / `_parse_pair` | 34/48 | 原版**没有 `&` 和 `?`** 的分词器（见 `(9)`） | ❌ 缺 |
+
+`apply_dog_stick()` 的确切语义（**顺序和阈值都是行为的一部分**）：
+
+1. `crawl_phase` 非 0 → **直接 return**（爬行期间摇杆完全无效）；
+2. `mech_arm.is_enabled()` 且 `force=False` → return（机械臂开启时摇杆归机械臂）；
+3. `t = -int(turn)` —— **取负**，且 `int()` 向零截断；
+4. `|t| < JOY_TURN_DEAD(20)` → `set_joy_turn(0)`、`L=R=1`；
+   否则 `set_joy_turn(t)`、`L,R = _turn_phase_lr(t)`（C 侧已有
+   `control_chain_turn_phase_lr` ✅，注意它内部用的是**另一个**阈值 **10**）；
+5. 四选一：
+   - 不转、不前进、不后退 → `_go(0, L, R)`
+   - 在转（`|t|>=20`）→ `_go(2.5, L, R)`（`TURN_DRV_SPD`）
+   - 后退且不转 → `_go(2.0, 1, 1)`（`BACK_DRV_SPD`）
+   - 其余（前进）→ `_go(thr, L, R)`
+6. **`_go` 是 `padog.drive` 还是 `padog.move` 取决于 `gait_mode`**：
+   `_walk = (gait_mode == 1)` ⇒ `_go = drive if _walk else move`
+   —— 这正是 P-26 那条"WALK 只能靠 `drive`"在网页层的体现，**C 侧必须照搬**，
+   否则 WALK 摇杆会永远退回 TROT。
+
+`process_dog_from_req()` 的确切语义：
+
+1. `_parse_pair(req,'f','t')` 要求 **`f` 和 `t` 同时存在**，否则**整条请求忽略**
+   （只发 `t=` 不动）；
+2. **原地踏步优先**：若 `inplace_step_end_ms` 还没到 →
+   `set_leg_sit_offsets(0,0)` + **`move(4, 1, 1)`** + return。
+   ⚠️ `move(4,1,1)` 自己会清掉 `inplace_step_end_ms` ⇒ 这就是那条
+   "网页原地步态测试**只生效一帧**"的机制（P-26 已记录）；
+3. 死区（`thr==0` 且 `|turn|<20`）→ `set_leg_sit_offsets(0,0)`；
+   非爬行时再 `set_joy_turn(0)` + `move(0,0,0)`（= **完全停车**）；
+4. 否则 → `set_leg_sit_offsets(0,0)` + `apply_dog_stick(thr, turn, force=dog_when_arm)`；
+5. **每条路径都会 `set_leg_sit_offsets(0, 0)`** —— 别漏。
+
+⇒ 这一层是**纯逻辑、零外设**，可以完整做 golden 对照，**不需要板子**。
+它比"协议怎么切字节"重要得多：切错了狗不动，这层错了狗**乱动**。
+
+### (9) 现有网页客户端的真实报文格式（决定 C 服务端要"吃什么"）
+
+`drive.html` 发的**不是**标准 query string：
+
+```js
+r.open("GET","key="+k)              // 62 行：没有 "?"，参数落在 path 里
+r.open("GET","grip="+v)             // 80
+r.open("GET","jy="+ay+"jx="+ax)     // 100：两个参数之间**连分隔符都没有**
+r.open("GET","f="+dy+"t="+dx)       // 108：同上
+```
+
+也就是 `GET /f=10t=-5`、`GET /jy=10jx=-5`、`GET /key=btn_stand`。
+原版靠 `_parse_pair()` 拿**下一个键**当分隔符（`req.find(k2+'=', i+2)`），
+再用 `_leading_int()` 取前导整数 ⇒ **尾随垃圾被静默丢弃**（`f=10abc` 当作 10）。
+
+⇒ 两件事都要照顾：
+
+1. **老页面必须继续能用。** 分词器要能吃 `f=10t=-5` 这种无分隔符形式，
+   并保留"取前导整数、忽略尾随垃圾"的宽容度 —— 否则用户手上的
+   `drive.html` 直接失效，P5 就**没法在板子上测**（这是本轮唯一的实测手段）。
+   但宽容**只允许出现在值的尾部**：键名、键序、取值范围、事件名仍然严格校验。
+   §8.2/§8.3 要的是"不 `exec()`、白名单、范围检查"，**不是"换个地方继续宽容"**。
+2. **新页面对齐同一套校验。** 新格式用 `;` 分隔（`k=v;...`），
+   和 `f=10t=-5` 走**同一个键表、同一套范围、同一份事件名表**。
+   同一件事只准写一份（P-22/P-27）。
+
+⚠️ **单位要照抄**：`f`/`t` 是 **-100..100 的百分比**，不是内部的 `thr`；
+`grip` 也是百分比（`mech_arm.set_grip_pct`）。全部缩放、死区、取负
+都在 `(8)` 那一层做，**协议层不许顺手帮它换算** —— 换算写两处必然有一处错。
+
 ## 1. 当前 MicroPython 控制链
 
 ```text
