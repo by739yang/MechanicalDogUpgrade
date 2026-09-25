@@ -342,7 +342,22 @@ bool app_chain_step(int64_t now_ms, float angle_out[SERVO_MAP_CHANNELS])
     control_chain_input_t in;
     memset(&in, 0, sizeof(in));
     control_chain_cmd_make_input(&s_cmd, (int32_t)now_ms, &in);
-    in.crawl_phase = 0;      /* 爬行动作是网页的"动作"，P5/P6 再接 */
+    /*
+     * 爬行入口（`APP_ACTION_CRAWL`）把 `crawl_phase = 1` 与两个截止时刻写进 `s_st`
+     * （`app_chain_set_crawl()`），这里必须**原样喂给链**：`control_chain_tick()`
+     * 结束时会 `st->crawl_phase = w.crawl_phase`，所以恒喂 0 的话下一帧 `s_st`
+     * 又变回 0，`chain_crawl_service()` 永远不启动、爬行按钮是个死键。
+     *
+     * ⚠️ 把 `crawl_until_ms` / `crawl_settle_until_ms` / `crawl_saved_h` 留空是有意的：
+     * 链里那三个量取自 `st` 而不是 `in`（`control_chain.c` 的 tick 开头
+     * `w.crawl_until_ms = st->crawl_until_ms` 等），只有 `crawl_phase` 走输入。
+     *
+     * ⚠️ 爬行的**执行**整个在控制链里（`chain_crawl_service`），所以
+     * `APP_ACTION_CRAWL` 只有在 **CHAIN 模式**下才真的会爬 —— 模式是互斥的
+     * （`motion.c`：ACTION 模式不调 `app_chain_step()`）。ACTION 模式下调用它
+     * 只会把状态摆好、不会推进。接线方（控制台 / P5）负责切模式。
+     */
+    in.crawl_phase = s_st.crawl_phase;
 
     control_chain_out_t out;
     memset(&out, 0, sizeof(out));
@@ -508,6 +523,65 @@ void app_chain_get_crawl(int *crawl_phase, int32_t *crawl_until_ms,
     }
     if (crawl_settle_until_ms != NULL) {
         *crawl_settle_until_ms = s_st.crawl_settle_until_ms;
+    }
+    xSemaphoreGive(s_mutex);
+}
+
+esp_err_t app_chain_set_r_h(float r_h)
+{
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    /* ⚠️ 只改 state 的 R_H。`H_goal` 在 `s_cmd.goal[GOAL_H]` 里，这里**一个字都不碰**
+     * —— 见 app_chain.h：复刻 `R_H = crawl_saved_h` 与复刻 `height()` 是两件事。 */
+    s_st.R_H = r_h;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+esp_err_t app_chain_set_crawl_saved_h(int crawl_saved_h)
+{
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    s_st.crawl_saved_h = crawl_saved_h;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+int app_chain_get_crawl_saved_h(void)
+{
+    int v = 0;
+    if (s_mutex == NULL) {
+        return 0;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return 0;
+    }
+    v = s_st.crawl_saved_h;
+    xSemaphoreGive(s_mutex);
+    return v;
+}
+
+void app_chain_get_crawl_ms(int32_t *settle_ms, int32_t *duration_ms)
+{
+    if (s_mutex == NULL) {
+        return;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    if (settle_ms != NULL) {
+        *settle_ms = s_cfg.crawl_settle_ms;
+    }
+    if (duration_ms != NULL) {
+        *duration_ms = s_cfg.crawl_duration_ms;
     }
     xSemaphoreGive(s_mutex);
 }

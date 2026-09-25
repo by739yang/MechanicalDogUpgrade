@@ -413,6 +413,32 @@ int app_config_validate(app_config_t *cfg, int *changed, char *msg, size_t msg_l
     return APP_CFG_OK;
 }
 
+int app_config_nudge_servo_center(app_config_t *cfg, app_cfg_joint_t joint, float delta,
+                                  int *changed, char *msg, size_t msg_len)
+{
+    if (changed != NULL) {
+        *changed = 0;
+    }
+    if (msg != NULL && msg_len > 0) {
+        msg[0] = '\0';
+    }
+    if (cfg == NULL || (int)joint < 0 || (int)joint >= APP_CFG_JOINTS) {
+        return APP_CFG_ERR_ARG;
+    }
+    /* 选中的腿 = `cal_leg_sel`（原版 `web_c.py:138 / 520` 的 `user_leg_num`，1..4） */
+    if (cfg->cal_leg_sel < 1 || cfg->cal_leg_sel > APP_CFG_LEGS) {
+        return APP_CFG_ERR_ARG;
+    }
+
+    const int leg = (int)cfg->cal_leg_sel - 1;
+    cfg->servo_center[leg][(int)joint] += delta;
+
+    /* 限幅/校验**只有这一处实现**（`app_config_validate` 里那个 0..180 循环）。
+     * 本函数因此不重复写边界、也不重复写"报改动"的逻辑：`changed`/`msg` 的语义与
+     * `cfg set` 那条路完全一致（P-22/P-27：同一份限幅写两份，就有一份会是错的）。 */
+    return app_config_validate(cfg, changed, msg, msg_len);
+}
+
 /* ==========================================================================
  * 持久化
  * ========================================================================== */

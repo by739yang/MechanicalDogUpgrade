@@ -337,12 +337,14 @@ static void cmd_action(const char *args)
         kind = APP_ACTION_WAVE;
     } else if (strcmp(args, "step") == 0) {
         kind = APP_ACTION_INPLACE_STEP;
+    } else if (strcmp(args, "crawl") == 0) {
+        kind = APP_ACTION_CRAWL;
     } else if (strcmp(args, "stop") == 0) {
         app_action_stop();
         ESP_LOGI(TAG, "动作已取消（注意：松力请用 `estop` 或 `motion stop`）");
         return;
     } else {
-        ESP_LOGE(TAG, "用法: action stand|sit|sit_direct|wave|step|stop");
+        ESP_LOGE(TAG, "用法: action stand|sit|sit_direct|wave|step|crawl|stop");
         return;
     }
 
@@ -353,7 +355,18 @@ static void cmd_action(const char *args)
     }
     motion_keepalive();   /* 动作也是"有人在下命令" */
 
-    if (motion_get_mode() != MOTION_MODE_ACTION) {
+    if (kind == APP_ACTION_CRAWL) {
+        /*
+         * 爬行是唯一一个"入口在动作层、执行在控制链"的动作：`chain_crawl_service()`
+         * 跑在 `control_chain_tick()` 里，而 `motion.c` 的两个模式是互斥的
+         * （ACTION 模式不调 `app_chain_step()`）。所以它要的是 CHAIN 模式，
+         * **和别的动作恰好相反**。
+         */
+        if (motion_get_mode() != MOTION_MODE_CHAIN) {
+            ESP_LOGW(TAG, "当前是 %s 模式 —— 爬行由控制链执行，请先 `motion mode chain`",
+                     motion_mode_name(motion_get_mode()));
+        }
+    } else if (motion_get_mode() != MOTION_MODE_ACTION) {
         ESP_LOGW(TAG, "当前是 %s 模式 —— 请先 `motion mode action`，否则动作不会下发角度",
                  motion_mode_name(motion_get_mode()));
     }

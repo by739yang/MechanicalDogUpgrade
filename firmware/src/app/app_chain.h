@@ -217,6 +217,48 @@ esp_err_t app_chain_set_crawl(int crawl_phase, int32_t crawl_until_ms,
 void app_chain_get_crawl(int *crawl_phase, int32_t *crawl_until_ms,
                          int32_t *crawl_settle_until_ms);
 
+/**
+ * @brief 直接写 chain **state** 的 `R_H`（站高当前值），**不动** `H_goal`。
+ *
+ * ⚠️ 这一个与 `app_chain_set_height()` **不是**同一件事，别混用：
+ * ```python
+ * height(goal):            # 复刻者 = app_chain_set_height()
+ *     H_goal = goal
+ *     R_H = goal           # 两个都写
+ *
+ * action_crawl():          # 复刻者 = 本函数 + app_chain_set_crawl_saved_h()
+ *     crawl_saved_h = int(H_goal)
+ *     R_H = crawl_saved_h  # 只写 R_H；H_goal 原样留着
+ * ```
+ * 两者只在 `H_goal` 是整数时才碰巧一样。原版的可达域里它**恒为整数**
+ * （`padog.py:156` 的 `H_goal=int(H_goal)`、`web_c.py:366/517` 的 `int(...)`），
+ * 但 C 版 `app_config_t.h_goal` 是 float 且 `cfg set h_goal` 不截断 ⇒ 域更宽，
+ * 所以这一行的区别**必须**如实表达（`golden/action_crawl.csv` 的 `H_goal` 列就是它）。
+ */
+esp_err_t app_chain_set_r_h(float r_h);
+
+/**
+ * @brief 写/读爬行前保存的站高（`padog.py:823` 的 `crawl_saved_h = int(H_goal)`）。
+ *
+ * 它是 `control_chain_state_t` 的字段（爬行收尾 `_crawl_finish()` 用它恢复站高），
+ * 在 P5 之前**没有任何入口能写它** —— 只有 `control_chain_state_init()` 按
+ * `int(cfg->H_goal)` 播一次种。
+ */
+esp_err_t app_chain_set_crawl_saved_h(int crawl_saved_h);
+
+/** @brief 读回 `crawl_saved_h`（测试用；证明"存站高"这件事真的落地了，P-25） */
+int app_chain_get_crawl_saved_h(void);
+
+/**
+ * @brief 读回两个爬行时长（毫秒）：原版 `CRAWL_SETTLE_MS` / `CRAWL_DURATION_MS`
+ *        （`padog.py:170~171`）。
+ *
+ * 它们不在 `app_config_t` 里（原版是模块级常量），只由
+ * `control_chain_cfg_defaults()` 提供 ⇒ 由本模块转出来，免得动作层再抄一份
+ * 400/5000（同一份常量写两份 = P-22/P-27 那一类错误）。任一参数可为 NULL。
+ */
+void app_chain_get_crawl_ms(int32_t *settle_ms, int32_t *duration_ms);
+
 /** @brief 把 `app_config_t` 映射成 `control_chain_cfg_t`（供测试与调试直接调用） */
 void app_chain_cfg_from_app_config(const app_config_t *c, control_chain_cfg_t *out);
 

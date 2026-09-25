@@ -1,4 +1,4 @@
-﻿# Local secrets
+# Local secrets
 config.py
 config.local.py
 secrets.h
@@ -29,7 +29,9 @@ build/
 diagnostics/boot_log.txt
 
 # Host golden-test build output
-tools/golden/build/
+# The trailing "*" also covers the per-task scratch dirs (build_wt/, build_verify/, ...)
+# that parallel workstreams create so they do not collide on build/.
+tools/golden/build*/
 
 # Local backups and test artifacts
 _board_backup_*/

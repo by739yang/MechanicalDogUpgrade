@@ -59,6 +59,33 @@ extern "C" {
 /** 每腿关节数（髋 / 大腿 / 小腿） */
 #define APP_CFG_JOINTS    3
 
+/**
+ * @brief 关节下标 —— 与 `servo_center[leg][joint]` 的第二维一致。
+ *
+ * ⚠️⚠️ **原版那三个字母与本枚举的名字不是"望文生义"的关系**，别按字母猜：
+ *
+ * | 原版键 | 原版量 | 本枚举 | `servo_center[leg][?]` |
+ * |---|---|---|---|
+ * | `ip` / `id` | `init_<n>p` | `APP_CFG_JOINT_HIP` | `[0]`（`cN_hip`） |
+ * | `hi` / `hd` | `init_<n>h` | `APP_CFG_JOINT_THIGH` | `[1]`（`cN_thigh`） |
+ * | `si` / `sd` | `init_<n>s` | `APP_CFG_JOINT_SHANK` | `[2]`（`cN_shank`） |
+ *
+ * 依据（两处独立来源，都不是"名字像"）：
+ * 1. `web_c.py:230` 的标定页标签是**权威命名**：
+ *    `1左前 髋：init_1p   大：init_1h   小：init_1s`
+ *    ⇒ `p` = 髋、`h` = **大（腿）**、`s` = 小（腿）。
+ * 2. `padog.py:508~510` 把三个字母按 `angle(0, init_1p)` / `angle(1, init_1h)` /
+ *    `angle(2, init_1s)` 送去，而 `servo_map.h` / `app_cfg_cmd.c` 的 `cN_hip/thigh/shank`
+ *    顺序就是 `0/1/2` ⇒ 两边顺序完全一致，只是原版用 `p/h/s` 三个字母。
+ *
+ * 结论：**`h` 是"大"（大腿），不是"髋"** —— `hi` 调的是 `cN_thigh`。
+ */
+typedef enum {
+    APP_CFG_JOINT_HIP   = 0,   /**< 髋（原版 `p`：`ip`/`id`） */
+    APP_CFG_JOINT_THIGH = 1,   /**< 大腿（原版 `h`：`hi`/`hd`） */
+    APP_CFG_JOINT_SHANK = 2,   /**< 小腿（原版 `s`：`si`/`sd`） */
+} app_cfg_joint_t;
+
 /** 返回码（纯 C，不用 esp_err_t） */
 typedef enum {
     APP_CFG_OK          =  0,
@@ -271,6 +298,37 @@ void app_config_defaults(app_config_t *cfg);
  * @return `APP_CFG_OK`；参数错误返回 `APP_CFG_ERR_ARG`
  */
 int app_config_validate(app_config_t *cfg, int *changed, char *msg, size_t msg_len);
+
+/**
+ * @brief 标定微调：把**当前选中腿**的一个关节中位角 ±1（原版的 `hi`/`hd`、
+ *        `si`/`sd`、`ip`/`id` 六个标定键）。
+ *
+ * 原版（`web_c.py:524~535`）：
+ * ```python
+ * elif value == 'hi':
+ *     exec("padog.init_"+user_leg_num+"h="+"padog.init_"+user_leg_num+"h+1")
+ * ```
+ * 其中 `user_leg_num` 就是 `cal_leg_sel`（`l1`~`l4` 选 1..4，`web_c.py:420~435`）。
+ * C 侧对应 `servo_center[cal_leg_sel-1][joint] += delta`。关节的选择见
+ * `app_cfg_joint_t`（⚠️ `h` 是**大腿**，不是髋）。
+ *
+ * @param cfg      待修改配置（**就地修改**；不改存储，落盘仍是 `cfg save` = 原版 `sc`）
+ * @param joint    `APP_CFG_JOINT_HIP` / `_THIGH` / `_SHANK`
+ * @param delta    增量（原版是 ±1；其它值也允许，符号即方向）
+ * @param changed  输出：`app_config_validate()` 报告的**被限幅项数**（0 = 没被夹）。
+ *                 正常情况下只可能是本函数动过的那一项（其余字段本来就是合法的）
+ * @param msg      输出：第一处被限幅的说明（如 `servo_center[3].thigh`）。**没被限幅时
+ *                 是空串**（这套机制报的是"被改动了什么"，不是"被调用了"）。可为 NULL
+ * @param msg_len  msg 缓冲区长度
+ * @return `APP_CFG_OK`；`cfg`/`joint`/`cal_leg_sel` 非法返回 `APP_CFG_ERR_ARG`
+ *
+ * @note **限幅只有一处**：本函数写完之后调用 `app_config_validate()`，用的就是
+ *       `cfg set` 那条路用的同一套边界与同一套"报改动"机制 ⇒ 越界会**停在上限**
+ *       而不是无限累加（§8.4「越界自动拒绝/限幅」），且不需要在这里另立一份 0..180
+ *       （同一份限幅写两份，就会有一份是错的：P-22/P-27）。
+ */
+int app_config_nudge_servo_center(app_config_t *cfg, app_cfg_joint_t joint, float delta,
+                                  int *changed, char *msg, size_t msg_len);
 
 /**
  * @brief 从存储读取配置。

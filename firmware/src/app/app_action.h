@@ -49,9 +49,16 @@ extern "C" {
  * | `APP_ACTION_SIT` / `APP_ACTION_SIT_DIRECT` | `action_sit()` = `action_sit_direct()` | 不写，启动"站→坐"动画（`hold_freeze=True`） |
  * | `APP_ACTION_WAVE` | `action_wave()` = `action_wave_direct()` | 由步进器一段一段写（掩码） |
  * | `APP_ACTION_INPLACE_STEP` | 网页的"步态测试"（`web_c.py:398` 写 `inplace_step_end_ms`）+ `mainloop` 881~888 | 本身不写；它下的是**命令层**的 TROT（见下） |
+ * | `APP_ACTION_CRAWL` | `action_crawl()`（`padog.py:810~831`） | **不写** —— 它一个舵机都不碰，只改状态（爬行状态机在 `control_chain.c`） |
  *
  * ⚠️ `SIT` 与 `SIT_DIRECT` 在原实现里是同一个函数（`action_sit()` 只是一行别名），
  * 分成两个命令名只是为了和原函数名一一对应，行为完全一样。
+ *
+ * ⚠️ `CRAWL` 是**入口序列**，不是爬行本体：`action_crawl()` 在原版里被**故意**没搬进
+ * `control/action.c`（爬行状态机整个在 `control_chain.c`，搬过去两边会抢
+ * `crawl_phase`，见 `control/action.h`）。所以它在**本层**实现，只把
+ * `padog.py:815~831` 那 14 行副作用按原顺序施加（含 `crawl_phase = 1` 与两个截止时刻），
+ * 爬行随后由控制链自己推进。
  */
 typedef enum {
     APP_ACTION_NONE = 0,
@@ -60,6 +67,7 @@ typedef enum {
     APP_ACTION_SIT_DIRECT,
     APP_ACTION_WAVE,
     APP_ACTION_INPLACE_STEP,
+    APP_ACTION_CRAWL,
 } app_action_kind_t;
 
 /** 状态快照（控制台 / 测试用） */
@@ -138,8 +146,38 @@ void app_action_get_status(app_action_status_t *out);
  */
 const action_cfg_t *app_action_get_cfg(void);
 
-/** @brief 动作种类名（日志用，未知返回 "?"） */
+/**
+ * @brief 动作种类名（日志用，未知返回 "?"） */
 const char *app_action_kind_name(app_action_kind_t kind);
+
+/* ==================================================================== */
+/*  `inplace_step_end_ms` 的读写（宿主测试 / 协议层用）                   */
+/* ==================================================================== */
+
+/**
+ * @brief 读回 `inplace_step_end_ms`（毫秒，0 = 没有"原地步态测试"在排队）。
+ *
+ * 它是 `action_state_t` 的字段，`app_action_status_t` 里没有 ⇒ 单独开一个 getter：
+ * "`action_crawl()` 把它清零"这件事**只能靠读回来证明**（P-25：只断言别的量没变，
+ * 是抓不到一个被吞掉的副作用的）。
+ */
+int32_t app_action_get_inplace_step_end_ms(void);
+
+/**
+ * @brief 直接写 `inplace_step_end_ms`（复刻原版**网络层**那一步）。
+ *
+ * ```python
+ * elif value == 'is':                                  # web_c.py:394~398
+ *     padog.gait(0)
+ *     padog.inplace_step_end_ms = utime.ticks_add(utime.ticks_ms(), 5000)
+ * ```
+ * 原版这个全局是**网络层直接写**的；C 版平时由 `APP_ACTION_INPLACE_STEP` 代劳，
+ * 但那一条路径**下一帧就会被 `move(3,1,1)` 清掉**（原版行为，见 `control/action.h`
+ * 第 4 条）⇒ 想摆一个"非 0 的前置值"就只剩这条窄接口。
+ *
+ * @note 宿主测试用它制造非 0 初值（P-18：默认值是 0 时，"清零"这件事测不出真假）。
+ */
+esp_err_t app_action_set_inplace_step_end_ms(int32_t end_ms);
 
 #ifdef __cplusplus
 }

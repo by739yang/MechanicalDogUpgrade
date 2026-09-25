@@ -169,6 +169,110 @@ static void merge_mask(uint32_t mask, const float deg[ACTION_CHANNELS],
 }
 
 /* ==========================================================================
+ * 爬行入口（`padog.action_crawl()`）
+ * ========================================================================== */
+
+/**
+ * @brief 复刻 Python `int(float)`：**向零截断**。
+ *
+ * 不要换成 `floorf`/`truncf` 之外的任何东西，也不要以为"负数要 floor"：
+ * `int(-3.5) == -3`、`int(-0.75) == 0`。`golden/action_crawl.csv` 里有这三类样本。
+ * （`control_chain_cmd.c` 里有一个同语义的 static `py_int()`；那边是命令层自己的一份。
+ *   两处各自 static 是有意的：这是**语言语义**的一行，不是"限幅/常量"那种
+ *   必须唯一来源的东西。）
+ */
+static int32_t action_py_int(float v)
+{
+    return (int32_t)v;
+}
+
+/**
+ * @brief 复刻 `padog.action_crawl()`（`padog.py:810~831`）的**入口序列**。
+ *
+ * `padog.py:815~831` 共 17 行语句，其中 `now = utime.ticks_ms()`（828）不是副作用；
+ * 剩下 16 步一条不漏、顺序照抄。按"副作用分组"数正好是 `§0.5(5)` 说的 **14 组**
+ * （前三行清零算一组、三个重心目标算一组、两个截止时刻算一组）：
+ *
+ * | # | 原版 | C 侧 |
+ * |---|---|---|
+ * | 1 | `pose_anim_active = False` | 本层 state |
+ * | 2 | `direct_pose_freeze = False` | 本层 state |
+ * | 3 | `inplace_step_end_ms = 0` | 本层 state |
+ * | 4 | `set_joy_turn(0)` | `app_chain_set_joy_turn(0)` |
+ * | 5 | `move(0, 0, 0)` | `app_chain_jog(0,0,0)` |
+ * | 6 | `gait(0)` | `app_chain_set_gait(0)` |
+ * | 7 | `servo_init(0)` | `app_chain_set_init_case(0)` |
+ * | 8 | `set_leg_sit_offsets(0, 0)` | `app_chain_set_sit_offsets(0,0)` |
+ * | 9 | `crawl_saved_h = int(H_goal)` | `app_chain_set_crawl_saved_h(int(H_goal))` |
+ * | 10 | `R_H = crawl_saved_h` | `app_chain_set_r_h(saved_h)` ← **不是** `set_height` |
+ * | 11~13 | `PIT/ROL/X_goal = int(in_pit/in_rol/in_y)` | `app_chain_gesture(...)` |
+ * | 14 | `crawl_settle_until_ms = now + CRAWL_SETTLE_MS` | `app_chain_get_crawl_ms()` |
+ * | 15 | `crawl_until_ms = now + CRAWL_SETTLE_MS + CRAWL_DURATION_MS` | 同上 |
+ * | 16 | `crawl_phase = 1` | `app_chain_set_crawl(1, until, settle)` |
+ *
+ * ## 三个必须说清楚的点
+ *
+ * 1. **`H_goal` 是"调用这一刻"链上的值**（原版读模块级全局）。C 版它住在命令层
+ *    `control_chain_cmd_t.goal[CONTROL_CHAIN_GOAL_H]`，所以先读回来再截断。
+ * 2. **`app_chain_set_height()` 不能拿来搬第 10 行**：它还写 `H_goal`
+ *    （`padog.height()` 是"两个都写"）。原版这里是 `R_H` 单写 ⇒ 一个窄接口。
+ * 3. **第 11~13 行与第 6 行的 `gait(0)` 结果相同**（`gait(0)` 里也有同一组
+ *    `int(in_*)`）⇒ 原版这三行是冗余的，它们**单独被漏掉也看不出来**。
+ *    照抄的理由是"逐行等价"，而不是"它们有独立效果"——这里如实写明，
+ *    免得以后有人以为 golden 能测出这三行（它测不出）。
+ * 4. ⚠️ **入口落地 ≠ 爬行会跑起来。** 本函数只把 `crawl_phase = 1` 写进
+ *    `control_chain_state_t`；而 `app_chain_step()` 目前喂给链的
+ *    `in.crawl_phase` **恒为 0**（`app_chain.c` 里那句"P5/P6 再接"），
+ *    `control_chain_tick()` 又会把 state 里的值覆盖回去 ⇒ 下一帧 `crawl_phase`
+ *    就变回 0，爬行状态机（`chain_crawl_service()`）不会启动。
+ *    P5 要接线时改的是**那一行**（把 `s_st.crawl_phase` 喂进去），不是这里。
+ *
+ * @param now 当前时刻（`utime.ticks_ms()` 语义）——原版自己读时钟，本层不读
+ */
+static void crawl_entry(int32_t now)
+{
+    uint32_t applied = 0;
+
+    /* ---- 1~3. 本层自己的三个量（原版直接把 padog 的模块级全局置 False/0） ---- */
+    s_ast.pose_anim_active    = false;
+    s_ast.direct_pose_freeze  = false;
+    s_ast.inplace_step_end_ms = 0;
+
+    /* ---- 4~8. 命令层。顺序不能合并（`action.h` 第 3 条：效果表就是有序的） ---- */
+    if (app_chain_set_joy_turn(0.0f) == ESP_OK) { ++applied; }
+    if (app_chain_jog(0.0f, 0, 0) == ESP_OK) { ++applied; }
+    if (app_chain_set_gait(0) == ESP_OK) { ++applied; }
+    if (app_chain_set_init_case(0) == ESP_OK) { ++applied; }
+    if (app_chain_set_sit_offsets(0.0f, 0.0f) == ESP_OK) { ++applied; }
+
+    /* ---- 9~10. `crawl_saved_h = int(H_goal)`；`R_H = crawl_saved_h` ---- */
+    app_chain_status_t cs;
+    app_chain_get_status(&cs);
+    const int32_t saved_h = action_py_int(cs.goal[CONTROL_CHAIN_GOAL_H]);
+    if (app_chain_set_crawl_saved_h((int)saved_h) == ESP_OK) { ++applied; }
+    if (app_chain_set_r_h((float)saved_h) == ESP_OK) { ++applied; }
+
+    /* ---- 11~13. 三个重心目标快照 ----
+     * `in_pit/in_rol/in_y` 取**本层 cfg**（与 `action_stand()` 里那个
+     * `gesture(0, 0, in_y)` 同一份来源）。它与链 cfg 的那一份同源于 app_config。 */
+    if (app_chain_gesture((float)action_py_int(s_cfg.in_pit),
+                          (float)action_py_int(s_cfg.in_rol),
+                          (float)action_py_int(s_cfg.in_y)) == ESP_OK) { ++applied; }
+
+    /* ---- 14~16. 两个截止时刻 + `crawl_phase = 1` ----
+     * 两个时长来自链 cfg（= padog.py:170~171 的 CRAWL_SETTLE_MS / CRAWL_DURATION_MS），
+     * 不在这里再抄一份 400/5000。 */
+    int32_t settle_ms = 0, duration_ms = 0;
+    app_chain_get_crawl_ms(&settle_ms, &duration_ms);
+    if (app_chain_set_crawl(1, now + settle_ms + duration_ms, now + settle_ms) == ESP_OK) {
+        ++applied;
+    }
+
+    /* `effects` 是"副作用真的走了命令层"的证据；这里如实累加（3 条本层状态不算） */
+    s_effects += applied;
+}
+
+/* ==========================================================================
  * 初始化
  * ========================================================================== */
 
@@ -252,6 +356,7 @@ const char *app_action_kind_name(app_action_kind_t kind)
     case APP_ACTION_SIT_DIRECT:   return "sit_direct";
     case APP_ACTION_WAVE:         return "wave";
     case APP_ACTION_INPLACE_STEP: return "step";
+    case APP_ACTION_CRAWL:        return "crawl";
     case APP_ACTION_NONE:
     default:                      return "?";
     }
@@ -358,6 +463,13 @@ static bool service_request(int32_t now, float out[ACTION_CHANNELS])
          * 下面步骤 2 的服务本帧就会消费掉它。
          * （`s_running` 由 `app_action_request()` 置位 —— 只写一处，见 P-27） */
         s_ast.inplace_step_end_ms = now + APP_ACTION_INPLACE_STEP_MS;
+        break;
+
+    case APP_ACTION_CRAWL:
+        /* `action_crawl()`（`padog.py:810~831`）：**没有**提前 return（与 stand/sit
+         * 不同），而且一个舵机都不写 —— 它只把爬行的入口状态摆好。
+         * 爬行状态机本身在 `control_chain.c`，本帧因此**不产生角度**。 */
+        crawl_entry(now);
         break;
 
     case APP_ACTION_NONE:
@@ -479,6 +591,37 @@ bool app_action_step(int64_t now_ms, float out[ACTION_CHANNELS])
 
     xSemaphoreGive(s_mutex);
     return produced;
+}
+
+/* ==========================================================================
+ * `inplace_step_end_ms` 的读写（见 app_action.h）
+ * ========================================================================== */
+
+int32_t app_action_get_inplace_step_end_ms(void)
+{
+    int32_t v = 0;
+    if (s_mutex == NULL) {
+        return 0;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return 0;
+    }
+    v = s_ast.inplace_step_end_ms;
+    xSemaphoreGive(s_mutex);
+    return v;
+}
+
+esp_err_t app_action_set_inplace_step_end_ms(int32_t end_ms)
+{
+    if (s_mutex == NULL || !s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    s_ast.inplace_step_end_ms = end_ms;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
 }
 
 void app_action_get_status(app_action_status_t *out)

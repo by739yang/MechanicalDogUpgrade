@@ -203,6 +203,64 @@ gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     "..\..\firmware\src\control\servo_map.c" -lm
 if errorlevel 1 goto :err
 
+rem Command protocol (comm/proto.c): the pure-C layer that replaces the original
+rem exec()-based HTTP parameter handling (migration table 8.2/8.3).  No golden
+rem CSV -- it is a check-based suite driven by the SAME controllable clock as
+rem test_motion_app, so heartbeat timeout, rate limiting and seq wrap-around are
+rem deterministic on the PC.  It also proves the legacy page format (the raw
+rem "GET /f=80t=0" that micropython/drive.html sends) is still parseable, because
+rem that page is the only way to accept P5 on the real board.
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
+    -I"..\..\firmware\src" -Ihost_stubs ^
+    -o build\test_proto.exe ^
+    test_proto.c host_stubs\host_sim.c ^
+    "..\..\firmware\src\comm\proto.c" -lm
+if errorlevel 1 goto :err
+
+rem The crawl ENTRY (padog.action_crawl) and the per-leg calibration nudges: the
+rem action channel (APP_ACTION_CRAWL) is driven exactly like stand/sit/wave, and
+rem every cross-module side effect is read back out of the chain/action modules
+rem (P-25: the original writes no servo at all here, so angles would compare nothing).
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
+    -I"..\..\firmware\src" -Ihost_stubs ^
+    -o build\test_action_crawl.exe ^
+    test_action_crawl.c host_stubs\host_sim.c ^
+    "..\..\firmware\src\app\app_action.c" ^
+    "..\..\firmware\src\app\app_chain.c" ^
+    "..\..\firmware\src\app\app_config.c" ^
+    "..\..\firmware\src\control\action.c" ^
+    "..\..\firmware\src\control\control_chain.c" ^
+    "..\..\firmware\src\control\control_chain_cmd.c" ^
+    "..\..\firmware\src\control\kinematics.c" ^
+    "..\..\firmware\src\control\body_pose.c" ^
+    "..\..\firmware\src\control\gait_trot.c" ^
+    "..\..\firmware\src\control\gait_walk.c" ^
+    "..\..\firmware\src\control\servo_map.c" -lm
+if errorlevel 1 goto :err
+
+rem The web request translation layer (comm/web_cmd.c): the part of web_common.py that
+rem decides HOW the dog moves, not merely what the numbers are.  This suite compares the
+rem ORDERED SEQUENCE OF COMMANDS ISSUED, not just the final state -- P-26 (move vs drive
+rem for WALK) and P-29 (a command that was never reached) were both invisible to value
+rem comparison and both are caught immediately by a call-sequence comparison.
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
+    -I"..\..\firmware\src" -Ihost_stubs ^
+    -o build\test_web_cmd.exe ^
+    test_web_cmd.c host_stubs\host_sim.c ^
+    "..\..\firmware\src\app\app_action.c" ^
+    "..\..\firmware\src\app\app_chain.c" ^
+    "..\..\firmware\src\app\app_config.c" ^
+    "..\..\firmware\src\comm\web_cmd.c" ^
+    "..\..\firmware\src\control\action.c" ^
+    "..\..\firmware\src\control\control_chain.c" ^
+    "..\..\firmware\src\control\control_chain_cmd.c" ^
+    "..\..\firmware\src\control\kinematics.c" ^
+    "..\..\firmware\src\control\body_pose.c" ^
+    "..\..\firmware\src\control\gait_trot.c" ^
+    "..\..\firmware\src\control\gait_walk.c" ^
+    "..\..\firmware\src\control\servo_map.c" -lm
+if errorlevel 1 goto :err
+
 echo.
 echo [4/4] run
 build\test_kinematics.exe golden\ik.csv
@@ -239,6 +297,15 @@ build\test_motion_app.exe
 if errorlevel 1 set FAILED=1
 echo.
 build\test_app_action.exe
+if errorlevel 1 set FAILED=1
+echo.
+build\test_proto.exe
+if errorlevel 1 set FAILED=1
+echo.
+build\test_action_crawl.exe golden\action_crawl.csv
+if errorlevel 1 set FAILED=1
+echo.
+build\test_web_cmd.exe golden\web_cmd.csv
 if errorlevel 1 set FAILED=1
 
 echo.
