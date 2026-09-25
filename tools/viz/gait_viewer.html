@@ -158,7 +158,6 @@ function drawGait() {
   const w = W - padL - padR;
   const trackH = (H - padT - padB) / 4;
   const gnd = groundY();
-  const base = localBaseline(leg, 10);
 
   /* 参考线：每 1 秒一条（65 ms/帧 ⇒ 15.38 帧）*/
   g.strokeStyle = "#edf2f7"; g.lineWidth = 1;
@@ -174,6 +173,9 @@ function drawGait() {
   }
 
   for (let leg = 0; leg < 4; ++leg) {
+    /* ⚠️ 基准必须在**这个循环里面**算：`leg` 只在这里有定义。
+     *    放外面会 ReferenceError，整个画布变空白（已踩过一次）。 */
+    const base = localBaseline(leg, 10);
     const y0 = padT + leg * trackH + 3, hh = trackH - 6;
     g.fillStyle = "#f7fafc"; g.fillRect(padL, y0, w, hh);
     g.strokeStyle = "#e2e8f0"; g.strokeRect(padL + 0.5, y0 + 0.5, w - 1, hh - 1);
