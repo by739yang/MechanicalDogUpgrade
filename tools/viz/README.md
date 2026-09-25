@@ -21,6 +21,17 @@ gcc -O2 -Wall -Wextra -Werror -std=c11 -I..\..\firmware\src -I..\golden ^
 dump_chain_trace.exe ..\golden\golden\control_chain_seq.csv ^
     ..\golden\golden\control_chain_seq_cmds.csv chain_trace.csv
 
+# 1b) 从**固件自己的动作层**导出动作逐帧角度（立正/坐下/挥手/原地踏步）
+gcc -O2 -Wall -Wextra -Werror -std=c11 -I..\..\firmware\src -I..\golden -I..\golden\host_stubs ^
+    -o dump_action_trace.exe dump_action_trace.c ..\golden\host_stubs\host_sim.c ^
+    ..\..\firmware\src\app\app_action.c ..\..\firmware\src\app\app_chain.c ^
+    ..\..\firmware\src\app\app_config.c ..\..\firmware\src\control\action.c ^
+    ..\..\firmware\src\control\control_chain.c ..\..\firmware\src\control\control_chain_cmd.c ^
+    ..\..\firmware\src\control\kinematics.c ..\..\firmware\src\control\body_pose.c ^
+    ..\..\firmware\src\control\gait_trot.c ..\..\firmware\src\control\gait_walk.c ^
+    ..\..\firmware\src\control\servo_map.c -lm
+dump_action_trace.exe action_trace.csv
+
 # 2) 生成自包含 HTML
 python make_viz.py
 
@@ -72,3 +83,41 @@ python check_viewer.py
 **先量原始数字，再在图里找原因。** `make_viz.py` 末尾会把每条腿的摆动相窗口
 **用文字打出来**（以及 TROT 对角同步、WALK 顺序两项判定）—— 那是与画面独立的第二条证据链。
 这一条也踩过两次：抬腿判据先是符号反了，后又把"机身滚转造成的持续偏移"误判成整段抬腿。
+
+
+## 动作序列（101~105）
+
+除了步态，同一页还能看**动作**：立正 / 坐下 / 直接坐下 / 挥手 / 原地踏步。
+在下拉框里选 `动作：…` 那几项即可。动作的画法与步态不同：
+
+| 面板 | 动作序列显示什么 |
+|---|---|
+| 顶部 | **动作时间轴**：有颜色的段 = 动作进行中，浅色段 = 动作已结束（保持最终姿态） |
+| 左右侧视 | 腿由**舵机角**推出（示意，见下） |
+| 底部 | **12 路舵机角随时间**（精确数据）：粗=髋、中=大腿、细虚线=小腿，颜色=腿 |
+
+### ⚠️ 为什么动作的腿只能是"示意"
+
+步态的腿可以精确画：控制链给的是**足端目标位置**（x/y），两点一连就是真位置。
+但**动作层直接写舵机角**，不给足端目标 ⇒ "舵机角 → 腿的形状"这一步没有唯一答案
+（取决于舵机盘怎么装、连杆怎么接）。
+
+所以这里取一个自洽的示意几何：中位角对应"大腿前倾 43.3°、小腿回折"的站姿
+（足端正好在中位髋下方 **200 mm**，与步态视图里站立腿一致 —— 这一点由
+`check_viewer.py` 用数字断言）；舵机角相对中位的**偏差**当作关节角增量。
+
+⇒ **能信的**：角度幅度、时刻、哪一路在动（都是精确数据）。
+⇒ **别当真的**：腿的绝对形状。
+
+### 这些动作是**谁**跑出来的
+
+不是在这里重放脚本，而是**用宿主桩把固件自己的 `app_action.c` 跑起来**
+（`dump_action_trace.c`），把它每帧的输出抄下来。
+
+> 为什么不在这里另写一个状态机：**"同一份东西写两份，就会有一份是错的"** ——
+> 本项目 P-27 已经为此吃过一次亏（命令脚本解释器写两份，导出程序那份静默忽略了
+> 新动作码，画出一张全错的图）。
+
+顺带一个交叉验证：`dump_action_trace` 测到挥手是 **4300 ms**，而
+`test_app_action`（独立实现、走的是控制台入口那条路）测到 **4310 ms** ——
+两条独立路径互相印证。

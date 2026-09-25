@@ -87,7 +87,44 @@ for (const s of seqKeys) {
   }
 }
 console.log('绘制调用 = ' + drawCalls + ' 次, 运行时错误 = ' + errors);
-if (errors > 0) { process.exit(1); }
+
+/* ---- 用数字验证"画面是有意义的"，而不是"没抛异常" ----
+   1) 示意几何自洽：把**中位角**喂进 actionLeg()，足端必须落在髋正下方约 200 mm
+      （与 gait 视图里站立腿的形状一致）。若为 0 或发散，说明参数写错了。 */
+let geoBad = 0;
+for (let L = 0; L < 4; L++) {
+  const f = actionLeg(L, ACTION_CENTRE[L]).foot;
+  if (Math.abs(f[0]) > 1.0 || Math.abs(f[1] + 200.0) > 1.0) {
+    geoBad++;
+    console.log('GEOMETRY FAIL leg' + (L + 1) + ': 中位姿足端 = (' +
+                f[0].toFixed(2) + ', ' + f[1].toFixed(2) + ')，应为 (0, -200)');
+  }
+}
+console.log('中位姿示意几何: ' + (geoBad === 0 ? '✔ 四腿足端都在髋下 200 mm'
+                                             : geoBad + ' 条腿不对'));
+
+/* 2) 每个序列确实在动：12 路舵机角的最大变化幅度 */
+let flat = 0;
+for (const s of seqKeys) {
+  const rows = DATA[s];
+  let maxRange = 0, which = -1;
+  for (let ch = 0; ch < 12; ch++) {
+    let lo = 1e9, hi = -1e9;
+    for (const fr of rows) { lo = Math.min(lo, fr.ang[ch]); hi = Math.max(hi, fr.ang[ch]); }
+    if (hi - lo > maxRange) { maxRange = hi - lo; which = ch; }
+  }
+  const tag = (rows[0].kind === 'action' ? '动作' : '步态');
+  console.log('  seq ' + String(s).padStart(3) + ' [' + tag + '] ' +
+              String(rows.length).padStart(4) + ' 帧, 12 路最大变化 = ' +
+              maxRange.toFixed(2) + '° (ch' + which + ')');
+  /* seq 101 = 立正：目标就是中位姿，所以**本来就该静止**，不算异常。
+     其余序列若几乎不动，那才是真问题。 */
+  if (maxRange < 1.0 && s !== 101) { flat++; }
+}
+if (flat > 0) { console.log('WARNING: ' + flat + ' 个序列几乎不动（幅度 <1°）—— 是不是动作没接上？'); }
+else { console.log('（seq 101 立正本来就不动：目标即中位姿，已排除在判定之外）'); }
+
+if (errors > 0 || geoBad > 0) { process.exit(1); }
 """
 
 
