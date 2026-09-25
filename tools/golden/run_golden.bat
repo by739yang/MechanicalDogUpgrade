@@ -160,11 +160,40 @@ gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     -I"..\..\firmware\src" -Ihost_stubs ^
     -o build\test_motion_app.exe ^
     test_motion_app.c host_stubs\host_sim.c ^
+    "..\..\firmware\src\app\app_action.c" ^
     "..\..\firmware\src\app\app_chain.c" ^
     "..\..\firmware\src\app\app_config.c" ^
     "..\..\firmware\src\app\motion.c" ^
     "..\..\firmware\src\app\servo_out.c" ^
     "..\..\firmware\src\drivers\drv_pca9685.c" ^
+    "..\..\firmware\src\control\action.c" ^
+    "..\..\firmware\src\control\control_chain.c" ^
+    "..\..\firmware\src\control\control_chain_cmd.c" ^
+    "..\..\firmware\src\control\kinematics.c" ^
+    "..\..\firmware\src\control\body_pose.c" ^
+    "..\..\firmware\src\control\gait_trot.c" ^
+    "..\..\firmware\src\control\gait_walk.c" ^
+    "..\..\firmware\src\control\servo_map.c" -lm
+if errorlevel 1 goto :err
+
+rem ACTION layer reached from the firmware: the console dispatcher (app_motion_cmd.c) is
+rem linked in on purpose, so the suite proves the commands really are reachable from the UART
+rem console and not merely linked.  It drives the real motion task in ACTION mode with the
+rem controllable clock all the way down to the PCA9685 shadow registers and checks the pose
+rem animation convergence, the ch_mask merge of the wave stepper, every cross-module effect
+rem (move/gait/height/gesture/sit_offsets/servo_init/crawl_reset) and e-stop mid-action.
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
+    -I"..\..\firmware\src" -Ihost_stubs ^
+    -o build\test_app_action.exe ^
+    test_app_action.c host_stubs\host_sim.c ^
+    "..\..\firmware\src\app\app_action.c" ^
+    "..\..\firmware\src\app\app_motion_cmd.c" ^
+    "..\..\firmware\src\app\app_chain.c" ^
+    "..\..\firmware\src\app\app_config.c" ^
+    "..\..\firmware\src\app\motion.c" ^
+    "..\..\firmware\src\app\servo_out.c" ^
+    "..\..\firmware\src\drivers\drv_pca9685.c" ^
+    "..\..\firmware\src\control\action.c" ^
     "..\..\firmware\src\control\control_chain.c" ^
     "..\..\firmware\src\control\control_chain_cmd.c" ^
     "..\..\firmware\src\control\kinematics.c" ^
@@ -207,6 +236,9 @@ build\test_action.exe golden\action_pose.csv golden\action_cmd.csv golden\action
 if errorlevel 1 set FAILED=1
 echo.
 build\test_motion_app.exe
+if errorlevel 1 set FAILED=1
+echo.
+build\test_app_action.exe
 if errorlevel 1 set FAILED=1
 
 echo.

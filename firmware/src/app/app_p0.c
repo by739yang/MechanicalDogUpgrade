@@ -537,8 +537,9 @@ static void handle_line(char *line)
                strcmp(cmd, "lgtest") == 0 || strcmp(cmd, "readback") == 0 ||
                strcmp(cmd, "gait") == 0 || strcmp(cmd, "jog") == 0 ||
                strcmp(cmd, "drive") == 0 ||
-               strcmp(cmd, "turn") == 0 || strcmp(cmd, "chain") == 0) {
-        /* P2/P3：固定周期运动、站姿、行走、急停、单通道映射核对 */
+               strcmp(cmd, "turn") == 0 || strcmp(cmd, "chain") == 0 ||
+               strcmp(cmd, "action") == 0) {
+        /* P2/P3：固定周期运动、站姿、行走、急停、动作层、单通道映射核对 */
         app_motion_cmd_handle(cmd, args);
     } else {
         ESP_LOGW(TAG, "未知命令 '%s'，输入 help 查看用法", cmd);

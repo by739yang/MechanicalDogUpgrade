@@ -78,6 +78,19 @@ extern "C" {
  */
 #define MOTION_MODE_CHAIN  1u
 
+/**
+ * ACTION：每帧调 `app_action_step()`（= 原版 `padog.py` 的姿态动画 / 动作层），
+ * 角度由 `app_action` 提供。
+ *
+ * ⚠️ **这条路径也不加速率限制**，理由与 CHAIN 完全相同：姿态表、混合插值和挥手脚本
+ * 都是被 golden 逐数值钉住的验证过的产物，限速就等于改了它。
+ *
+ * ⚠️ 动作**没产生角度**的帧（等 `time.sleep_ms` 的那几步、动画做完之后、
+ * 直写站姿之后的稳态）**保持上一帧输出**，绝不松力 —— 松力只由 `estop` /
+ * `motion stop` / 超时停车负责（单写者不变式见上）。
+ */
+#define MOTION_MODE_ACTION 2u
+
 /** @} */
 
 /** 周期统计快照 */
@@ -85,8 +98,9 @@ typedef struct {
     bool     running;          /**< 任务是否在跑 */
     bool     estopped;         /**< 是否因为急停而停止 */
     bool     settled;          /**< 12 路是否都已到达目标（CHAIN 模式下恒为 true） */
-    uint32_t mode;             /**< `MOTION_MODE_POSE` 或 `MOTION_MODE_CHAIN` */
+    uint32_t mode;             /**< `MOTION_MODE_POSE` / `MOTION_MODE_CHAIN` / `MOTION_MODE_ACTION` */
     uint32_t chain_frames;     /**< CHAIN 模式下链实际推进的帧数 */
+    uint32_t action_frames;    /**< ACTION 模式下动作层真的产出了角度的帧数 */
     uint32_t ticks;            /**< 循环次数 */
     uint32_t overruns;         /**< 实测周期超过标称周期的次数 */
     int64_t  period_last_us;   /**< 最近一次实测周期 */
@@ -165,7 +179,7 @@ void motion_get_stats(motion_stats_t *out);
 esp_err_t motion_set_period_ms(uint32_t ms);
 
 /**
- * @brief 切换控制模式：`MOTION_MODE_POSE` 或 `MOTION_MODE_CHAIN`。
+ * @brief 切换控制模式：`MOTION_MODE_POSE` / `MOTION_MODE_CHAIN` / `MOTION_MODE_ACTION`。
  *
  * @note 运行中切换是允许的：下一个控制周期就按新模式走。
  * @note `motion_set_target()` 会把模式**隐式切回 POSE** ——
@@ -175,6 +189,10 @@ esp_err_t motion_set_mode(uint32_t mode);
 
 /** @brief 当前控制模式 */
 uint32_t motion_get_mode(void);
+
+/** @brief 控制模式名（`"POSE"` / `"CHAIN"` / `"ACTION"`）。
+ *  ⚠️ 模式名的映射**只有这一处**（日志与控制台共用）—— 写两份就会有一份是错的（P-27）。 */
+const char *motion_mode_name(uint32_t mode);
 
 /** @brief 设置速率上限（度/秒）。1..2000。 */
 esp_err_t motion_set_rate_dps(float dps);

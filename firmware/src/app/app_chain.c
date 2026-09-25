@@ -389,3 +389,125 @@ void app_chain_get_status(app_chain_status_t *out)
     memcpy(out->angle_deg, s_angle, sizeof(out->angle_deg));
     xSemaphoreGive(s_mutex);
 }
+
+/* ==========================================================================
+ * 动作层副作用的窄接口
+ *
+ * 这四个（+ getter）专门为 `control/action.c` 的效果表而开。它们**只改状态**：
+ * 不推进链、不算角度、不写寄存器 —— 那三件事分别属于 `app_chain_step()` 与
+ * `servo_out`。全部在**已有的那把锁**里完成。
+ * ========================================================================== */
+
+esp_err_t app_chain_gesture(float pit, float rol, float x)
+{
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    control_chain_cmd_gesture(&s_cmd, pit, rol, x);
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+esp_err_t app_chain_set_sit_offsets(float front_y, float rear_y)
+{
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    /* ⚠️ 写的是 cfg（`_foot_y_targets()` 读它），不是 state。见 app_chain.h 的说明 */
+    s_cfg.front_leg_y_offset = front_y;
+    s_cfg.rear_leg_y_offset  = rear_y;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+void app_chain_get_sit_offsets(float *front_y, float *rear_y)
+{
+    if (s_mutex == NULL) {
+        return;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    if (front_y != NULL) {
+        *front_y = s_cfg.front_leg_y_offset;
+    }
+    if (rear_y != NULL) {
+        *rear_y = s_cfg.rear_leg_y_offset;
+    }
+    xSemaphoreGive(s_mutex);
+}
+
+esp_err_t app_chain_set_init_case(int init_case)
+{
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    s_st.init_case = init_case;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+int app_chain_get_init_case(void)
+{
+    int v = 0;
+    if (s_mutex == NULL) {
+        return 0;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return 0;
+    }
+    v = s_st.init_case;
+    xSemaphoreGive(s_mutex);
+    return v;
+}
+
+esp_err_t app_chain_crawl_reset(void)
+{
+    return app_chain_set_crawl(0, 0, 0);
+}
+
+esp_err_t app_chain_set_crawl(int crawl_phase, int32_t crawl_until_ms,
+                              int32_t crawl_settle_until_ms)
+{
+    if (s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    s_st.crawl_phase            = crawl_phase;
+    s_st.crawl_until_ms         = crawl_until_ms;
+    s_st.crawl_settle_until_ms  = crawl_settle_until_ms;
+    xSemaphoreGive(s_mutex);
+    return ESP_OK;
+}
+
+void app_chain_get_crawl(int *crawl_phase, int32_t *crawl_until_ms,
+                         int32_t *crawl_settle_until_ms)
+{
+    if (s_mutex == NULL) {
+        return;
+    }
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+    if (crawl_phase != NULL) {
+        *crawl_phase = s_st.crawl_phase;
+    }
+    if (crawl_until_ms != NULL) {
+        *crawl_until_ms = s_st.crawl_until_ms;
+    }
+    if (crawl_settle_until_ms != NULL) {
+        *crawl_settle_until_ms = s_st.crawl_settle_until_ms;
+    }
+    xSemaphoreGive(s_mutex);
+}

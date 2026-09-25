@@ -152,6 +152,71 @@ bool app_chain_step(int64_t now_ms, float angle_out[SERVO_MAP_CHANNELS]);
 /** @brief 读状态快照（线程安全） */
 void app_chain_get_status(app_chain_status_t *out);
 
+/* ==================================================================== */
+/*  动作层副作用的窄接口（P3 第 2 步）                                   */
+/*                                                                      */
+/*  `control/action.c` 把"改别的模块状态"的那几件事做成**显式效果表**，  */
+/*  由调用方按顺序施加。其中四种碰的是 `app_chain` 的私有状态 ——        */
+/*  下面这几个函数就是那扇门，**全部在既有互斥锁内完成**，不做任何别的  */
+/*  事（不推进链、不写舵机）。                                          */
+/*                                                                      */
+/*  getter 是给宿主测试用的：`ACTION_EFF_*` 有没有真的落到 chain 上，   */
+/*  只能靠读回来证明（只断言"输出没变"是抓不到被吞掉的副作用的，P-25）。 */
+/* ==================================================================== */
+
+/**
+ * @brief 动作层 `ACTION_EFF_GESTURE`：复刻 `padog.gesture(pit, rol, x)`
+ *        （直接覆写三个重心目标）。
+ *
+ * ⚠️ `control_chain.h` 没有暴露 `gesture()`，而 `action_stand()` / `action_sit_direct()`
+ * 都会产生这条效果 —— 少了它，"跨模块副作用被吞掉"就是 P-25 那个错误。
+ */
+esp_err_t app_chain_gesture(float pit, float rol, float x);
+
+/**
+ * @brief 动作层 `ACTION_EFF_SIT_OFFSETS`：写 chain 的**配置**
+ *        `front_leg_y_offset` / `rear_leg_y_offset`（= `set_leg_sit_offsets(front, rear)`）。
+ *
+ * @note 这是本工程第一次**在运行时改 chain 的 cfg** —— `control_chain.c` 里那句
+ *       "所有调用点传的都是 0，所以放进只读 cfg 就够"在动作层被打破了
+ *       （见 `control/action.h` 文件头第 3 条）。改动会在下次 `app_chain_init()` /
+ *       `app_chain_reload_cfg()` 时被配置重新覆盖。
+ */
+esp_err_t app_chain_set_sit_offsets(float front_y, float rear_y);
+
+/** @brief 读回两个腿部 Y 偏置（测试用） */
+void app_chain_get_sit_offsets(float *front_y, float *rear_y);
+
+/**
+ * @brief 动作层 `ACTION_EFF_SERVO_INIT`：写 chain **state** 的 `init_case`
+ *        （= `servo_init(key)`，`servo_output()` 的第二个实参：走 IK 还是直接站姿）。
+ */
+esp_err_t app_chain_set_init_case(int init_case);
+
+/** @brief 读回 `init_case`（测试用） */
+int app_chain_get_init_case(void);
+
+/**
+ * @brief 动作层 `ACTION_EFF_CRAWL_RESET`：把 chain state 的三个爬行量清零
+ *        （`padog.py:728~730 / 773~775 / 794~796`）。
+ *
+ * @note 爬行状态机整个归 `control_chain.c`，动作层只负责"清掉"（见 `control/action.h`：
+ *       `action_crawl()` 刻意没搬，否则两边都管 `crawl_phase` 会打架）。
+ */
+esp_err_t app_chain_crawl_reset(void);
+
+/**
+ * @brief 直接置爬行状态（爬行命令入口 P5/P6 用；宿主测试也用它给
+ *        `ACTION_EFF_CRAWL_RESET` 制造一个"非零初值" —— 否则"清零"这件事在
+ *        默认状态下测不出真假，那是 P-18 那一类无效输入）。
+ */
+esp_err_t app_chain_set_crawl(int crawl_phase, int32_t crawl_until_ms,
+                              int32_t crawl_settle_until_ms);
+
+/** @brief 读回三个爬行量（测试用；任一参数可为 NULL） */
+void app_chain_get_crawl(int *crawl_phase, int32_t *crawl_until_ms,
+                         int32_t *crawl_settle_until_ms);
+
 /** @brief 把 `app_config_t` 映射成 `control_chain_cfg_t`（供测试与调试直接调用） */
 void app_chain_cfg_from_app_config(const app_config_t *c, control_chain_cfg_t *out);
 

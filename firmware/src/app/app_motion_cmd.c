@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "app/app_action.h"
 #include "app/app_chain.h"
 #include "app/app_cfg_cmd.h"
 #include "app/motion.h"
@@ -33,15 +34,18 @@ void app_motion_cmd_help(void)
     ESP_LOGI(TAG, "  motion period <ms>           控制周期（默认 10 = 100 Hz）");
     ESP_LOGI(TAG, "  motion rate <deg_per_s>      速率上限（默认 120，仅 POSE 模式）");
     ESP_LOGI(TAG, "  motion timeout <ms>          命令超时后松力停车（默认 10000，0=关闭）");
-    ESP_LOGI(TAG, "  motion mode pose|chain       控制模式：直接 12 路角度 / 走控制链");
+    ESP_LOGI(TAG, "  motion mode pose|chain|action  控制模式：直接 12 路 / 控制链 / 姿态动画");
     ESP_LOGI(TAG, "  stand                        站姿（走控制链 = 原版真正的站姿）");
     ESP_LOGI(TAG, "  stand direct                 标定用站姿（12 路 = 中位角，见 E8）");
+    ESP_LOGI(TAG, "  action stand|sit|sit_direct|wave|step|stop");
+    ESP_LOGI(TAG, "                               姿态动画/动作层（须先 motion mode action）");
+    ESP_LOGI(TAG, "                                 stand/sit = 动画，wave = 挥手，step = 步态测试");
     ESP_LOGI(TAG, "  gait trot|walk               选步态（chain 模式）");
     ESP_LOGI(TAG, "  jog <spd> <L> <R>            行走命令（= 原版 move()，会切回 TROT）");
     ESP_LOGI(TAG, "  drive <spd> <L> <R>          行走命令（= 原版 drive()，不切步态）");
     ESP_LOGI(TAG, "  turn <pct>                   横杆转向百分比（|pct|>=10 才生效）");
     ESP_LOGI(TAG, "  chain                        打印控制链状态（相位/目标/角度）");
-    ESP_LOGI(TAG, "  estop [reason]               急停：12 路松力并停任务");
+    ESP_LOGI(TAG, "  estop [reason]               急停：取消动作 + 12 路松力并停任务");
     ESP_LOGI(TAG, "  lg <ch 0..11> <deg>          直接设某逻辑通道角度（须先 motion stop）");
     ESP_LOGI(TAG, "  lg off                       12 路全部无脉冲（松力）");
     ESP_LOGI(TAG, "  lgtest <ch> [delta_deg]      单通道相对中位角偏移，用于核对硬件映射");
@@ -98,18 +102,32 @@ static void cmd_motion(const char *args)
     }
 
     if (strcmp(sub, "stop") == 0) {
+        /* 停任务就是"取消动作"：先让动作层复位，免得下次 `motion mode action`
+         * 又接着跑半个挥手脚本；松力由 motion_stop() 完成 */
+        app_action_stop();
         motion_stop(MOTION_STOP_USER);
-        ESP_LOGI(TAG, "已停止，12 路松力");
+        ESP_LOGI(TAG, "已停止，动作已取消，12 路松力");
         return;
     }
 
     if (strcmp(sub, "mode") == 0) {
+        const uint32_t prev = motion_get_mode();
         if (strcmp(rest, "chain") == 0) {
             ESP_LOGI(TAG, "motion mode chain -> %s", esp_err_to_name(motion_set_mode(MOTION_MODE_CHAIN)));
         } else if (strcmp(rest, "pose") == 0) {
             ESP_LOGI(TAG, "motion mode pose -> %s", esp_err_to_name(motion_set_mode(MOTION_MODE_POSE)));
+        } else if (strcmp(rest, "action") == 0) {
+            ESP_LOGI(TAG, "motion mode action -> %s", esp_err_to_name(motion_set_mode(MOTION_MODE_ACTION)));
+            ESP_LOGI(TAG, "  用 `action stand|sit|sit_direct|wave|step|stop` 触发动作");
         } else {
-            ESP_LOGE(TAG, "用法: motion mode pose|chain");
+            ESP_LOGE(TAG, "用法: motion mode pose|chain|action");
+            return;
+        }
+        /* 离开 ACTION 模式 = 那些角度不会再被下发了 ⇒ 动作必须取消，
+         * 否则它一直挂在"进行中"，回来时突然接着动 */
+        if (prev == MOTION_MODE_ACTION && motion_get_mode() != MOTION_MODE_ACTION) {
+            app_action_stop();
+            ESP_LOGW(TAG, "已离开 ACTION 模式，正在进行的动作已取消");
         }
         return;
     }
@@ -219,7 +237,8 @@ static void cmd_jog(const char *args)
         return;
     }
     if (motion_get_mode() != MOTION_MODE_CHAIN) {
-        ESP_LOGW(TAG, "当前是 POSE 模式 —— 请先 `motion mode chain`，否则命令不生效");
+        ESP_LOGW(TAG, "当前是 %s 模式 —— 请先 `motion mode chain`，否则命令不生效",
+                 motion_mode_name(motion_get_mode()));
     }
     ESP_LOGI(TAG, "jog: spd=%.3f L=%d R=%d", (double)spd, L, R);
 }
@@ -249,7 +268,8 @@ static void cmd_drive(const char *args)
     ESP_LOGI(TAG, "drive: spd=%.3f L=%d R=%d（步态保持 %s）",
              (double)spd, L, R, (cs.gait_mode == 0) ? "TROT" : "WALK");
     if (motion_get_mode() != MOTION_MODE_CHAIN) {
-        ESP_LOGW(TAG, "当前是 POSE 模式 —— 请先 `motion mode chain`");
+        ESP_LOGW(TAG, "当前是 %s 模式 —— 请先 `motion mode chain`",
+                 motion_mode_name(motion_get_mode()));
     }
 }
 
@@ -270,7 +290,7 @@ static void cmd_chain(void)
     app_chain_get_status(&cs);
 
     ESP_LOGI(TAG, "控制链: 模式=%s 有效=%s 链帧=%u 节拍=%u ms",
-             (motion_get_mode() == MOTION_MODE_CHAIN) ? "CHAIN" : "POSE",
+             motion_mode_name(motion_get_mode()),
              cs.valid ? "是" : "否", (unsigned)cs.frames, (unsigned)cs.period_ms);
     ESP_LOGI(TAG, "命令: gait=%s spd=%.3f L=%d R=%d 转向=%.1f%%",
              (cs.gait_mode == 0) ? "TROT" : "WALK", (double)cs.spd, cs.L, cs.R,
@@ -288,9 +308,63 @@ static void cmd_chain(void)
 
 static void cmd_estop(const char *args)
 {
+    /* 急停也要把动作取消：否则任务停了、动作还挂在"进行中"，
+     * 下次 `motion start` 会从半个挥手脚本中间接着跑 */
+    app_action_stop();
     motion_estop((args != NULL && *args != '\0') ? args : "控制台命令");
     vTaskDelay(pdMS_TO_TICKS(30));   /* 给任务一个周期去执行 */
-    ESP_LOGW(TAG, "急停完成：12 路无脉冲（舵机松力），控制任务已停");
+    ESP_LOGW(TAG, "急停完成：动作已取消，12 路无脉冲（舵机松力），控制任务已停");
+}
+
+/* ==========================================================================
+ * action ...  —— 姿态动画 / 动作层（control/action.c，容差 0 对照过 padog.py）
+ * ========================================================================== */
+
+/**
+ * 把请求转给 `app_action`。角度只在 `MOTION_MODE_ACTION` 下才会被下发
+ * （那个模式的运动任务每帧调 `app_action_step()`）。
+ */
+static void cmd_action(const char *args)
+{
+    app_action_kind_t kind;
+    if (strcmp(args, "stand") == 0) {
+        kind = APP_ACTION_STAND;
+    } else if (strcmp(args, "sit") == 0) {
+        kind = APP_ACTION_SIT;
+    } else if (strcmp(args, "sit_direct") == 0) {
+        kind = APP_ACTION_SIT_DIRECT;
+    } else if (strcmp(args, "wave") == 0) {
+        kind = APP_ACTION_WAVE;
+    } else if (strcmp(args, "step") == 0) {
+        kind = APP_ACTION_INPLACE_STEP;
+    } else if (strcmp(args, "stop") == 0) {
+        app_action_stop();
+        ESP_LOGI(TAG, "动作已取消（注意：松力请用 `estop` 或 `motion stop`）");
+        return;
+    } else {
+        ESP_LOGE(TAG, "用法: action stand|sit|sit_direct|wave|step|stop");
+        return;
+    }
+
+    const esp_err_t err = app_action_request(kind);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "action %s 失败: %s", args, esp_err_to_name(err));
+        return;
+    }
+    motion_keepalive();   /* 动作也是"有人在下命令" */
+
+    if (motion_get_mode() != MOTION_MODE_ACTION) {
+        ESP_LOGW(TAG, "当前是 %s 模式 —— 请先 `motion mode action`，否则动作不会下发角度",
+                 motion_mode_name(motion_get_mode()));
+    }
+    if (!motion_is_running()) {
+        ESP_LOGW(TAG, "控制任务没在跑 —— `motion start` 后动作才会动");
+    }
+
+    app_action_status_t as;
+    app_action_get_status(&as);
+    ESP_LOGI(TAG, "动作已排队: %s（已产生角度的帧数=%u，累计效果=%u）",
+             app_action_kind_name(kind), (unsigned)as.steps, (unsigned)as.effects);
 }
 
 /* ==========================================================================
@@ -479,6 +553,8 @@ void app_motion_cmd_handle(const char *cmd, const char *args)
         cmd_chain();
     } else if (strcmp(cmd, "estop") == 0) {
         cmd_estop(args);
+    } else if (strcmp(cmd, "action") == 0) {
+        cmd_action(args);
     } else if (strcmp(cmd, "lg") == 0) {
         cmd_lg(args);
     } else if (strcmp(cmd, "lgtest") == 0) {
@@ -503,6 +579,11 @@ void app_motion_cmd_init(void)
         ESP_LOGE(TAG, "控制链初始化失败");
         return;
     }
+    /* 姿态动画 / 动作层。同样要在 app_cfg_cmd_init() 之后（要读配置里的中位角）。 */
+    if (app_action_init() != ESP_OK) {
+        ESP_LOGE(TAG, "动作层初始化失败");
+        return;
+    }
     /* 默认 POSE 模式：上电不会自己走 */
     (void)motion_set_mode(MOTION_MODE_POSE);
 
@@ -523,4 +604,5 @@ void app_motion_cmd_init(void)
              (unsigned)cs.period_ms);
     ESP_LOGI(TAG, "  站立: `stand` + `motion start`（走控制链，原版真正的站姿）");
     ESP_LOGI(TAG, "  走路: `motion mode chain` + `gait trot` + `jog -3 1 1` + `motion start`");
+    ESP_LOGI(TAG, "  动作: `motion mode action` + `action sit|stand|wave|step` + `motion start`");
 }

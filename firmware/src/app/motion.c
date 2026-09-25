@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "app/app_chain.h"
+#include "app/app_action.h"
 #include "app/app_cfg_cmd.h"
 #include "app/servo_out.h"
 #include "bsp/bsp_i2c.h"
@@ -48,6 +49,17 @@ static uint32_t s_mode       = MOTION_MODE_POSE;
 /* 统计（任务写、控制台读，用 s_mutex 保护） */
 static motion_stats_t s_stats;
 
+/*
+ * ACTION 模式的"上一帧输出"。不能借 POSE 的 `s_state.current`：
+ * 任务体开头会把 `current` 清零（`target_valid` 为假时），而宿主桩里
+ * `vTaskDelayUntil()` 是 longjmp 让出点、任务体每次被驱动都从头进一次 —— 借用它的话
+ * 每个"动作没产生角度"的帧都会被填成 0°，把 0° 打给舵机。见 host_stubs/host_sim.c。
+ */
+static float s_action_last[SERVO_MAP_CHANNELS];
+/** ⚠️ `volatile`：控制台（`motion_stop()` / `motion_estop()`）会把它清掉，
+ *  只有运动任务会写它旁边的数组 —— 它只是一个"缓存还有效吗"的提示位 */
+static volatile bool s_action_last_valid = false;
+
 static void stats_reset(void)
 {
     memset(&s_stats, 0, sizeof(s_stats));
@@ -58,9 +70,20 @@ static void stats_reset(void)
     s_stats.mode          = s_mode;
 }
 
+const char *motion_mode_name(uint32_t mode)
+{
+    switch (mode) {
+    case MOTION_MODE_CHAIN:  return "CHAIN";
+    case MOTION_MODE_ACTION: return "ACTION";
+    case MOTION_MODE_POSE:
+    default:                 return "POSE";
+    }
+}
+
 esp_err_t motion_set_mode(uint32_t mode)
 {
-    if (mode != MOTION_MODE_POSE && mode != MOTION_MODE_CHAIN) {
+    if (mode != MOTION_MODE_POSE && mode != MOTION_MODE_CHAIN &&
+        mode != MOTION_MODE_ACTION) {
         return ESP_ERR_INVALID_ARG;
     }
     s_mode = mode;
@@ -68,8 +91,10 @@ esp_err_t motion_set_mode(uint32_t mode)
         s_stats.mode = mode;
         xSemaphoreGive(s_mutex);
     }
-    ESP_LOGI(TAG, "控制模式 = %s", (mode == MOTION_MODE_CHAIN) ? "CHAIN（控制链/步态）"
-                                                              : "POSE（直接 12 路角度）");
+    ESP_LOGI(TAG, "控制模式 = %s (%s)", motion_mode_name(mode),
+             (mode == MOTION_MODE_CHAIN)  ? "控制链/步态"
+             : (mode == MOTION_MODE_ACTION) ? "姿态动画/动作层"
+                                            : "直接 12 路角度");
     return ESP_OK;
 }
 
@@ -117,7 +142,7 @@ esp_err_t motion_set_target(const float deg[SERVO_MAP_CHANNELS])
     /* "直接给 12 路角度"本身就是 POSE 语义 —— 隐式切回 POSE，避免
      * 在 CHAIN 模式下设了目标却看不到任何效果那种**静默无效**。 */
     if (s_mode != MOTION_MODE_POSE) {
-        ESP_LOGW(TAG, "收到直接角度目标，控制模式自动从 CHAIN 切回 POSE");
+        ESP_LOGW(TAG, "收到直接角度目标，控制模式自动从 %s 切回 POSE", motion_mode_name(s_mode));
         s_mode = MOTION_MODE_POSE;
         if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             s_stats.mode = s_mode;
@@ -239,6 +264,9 @@ void motion_estop(const char *why)
 {
     ESP_LOGE(TAG, "*** 急停 *** %s", (why != NULL) ? why : "");
 
+    /* 急停之后不保留"上一帧动作输出"：重启后不会把上一次动作的姿态重新通电 */
+    s_action_last_valid = false;
+
     if (s_run) {
         /* 任务在跑 -> 只置标志，由任务在下一个周期内松力并退出（单写者不变式） */
         s_estop = true;
@@ -286,14 +314,15 @@ static void log_stats_line(void)
 
     ESP_LOGI(TAG,
              "统计: ticks=%u 模式=%s 周期 us(avg/max)=%lld/%lld 抖动max=%lld us "
-             "干活 us(avg/max)=%lld/%lld 超期=%u I2C写=%u 链帧=%u 已到位=%s",
+             "干活 us(avg/max)=%lld/%lld 超期=%u I2C写=%u 链帧=%u 动作帧=%u 已到位=%s",
              (unsigned)st.ticks,
-             (st.mode == MOTION_MODE_CHAIN) ? "CHAIN" : "POSE",
+             motion_mode_name(st.mode),
              (long long)st.period_avg_us, (long long)st.period_max_us,
              (long long)st.jitter_max_us,
              (long long)st.work_avg_us, (long long)st.work_max_us,
              (unsigned)st.overruns,
              (unsigned)st.i2c_writes, (unsigned)st.chain_frames,
+             (unsigned)st.action_frames,
              st.settled ? "是" : "否");
 }
 
@@ -373,7 +402,8 @@ static void motion_task(void *arg)
         const float max_step = s_rate_dps * ((float)dt_us / 1000000.0f);
 
         float snapshot[SERVO_MAP_CHANNELS];
-        bool  settled = true;
+        bool  settled  = true;
+        bool  have_out = true;   /**< false = 本帧没有任何角度可下发（ACTION 模式才有） */
 
         if (s_mode == MOTION_MODE_CHAIN) {
             /*
@@ -392,6 +422,41 @@ static void motion_task(void *arg)
                 }
             }
             settled = true;   /* 链模式下没有"是否到位"这个概念 */
+        } else if (s_mode == MOTION_MODE_ACTION) {
+            /*
+             * ACTION：角度由姿态动画 / 动作层给。⚠️ 这里**刻意不做速率限制**，
+             * 理由和 CHAIN 一样：姿态表、混合插值、挥手脚本的时序都是被 golden
+             * 逐数值钉住的验证过的产物，限速就改了它（见 motion.h）。
+             *
+             * 动作没产生角度的帧（原版在 `time.sleep_ms()` 里、动画已做完、
+             * 直写站姿之后的稳态）**保持上一帧输出**，不松力 —— 松力只归
+             * `estop` / `motion stop` / 超时停车。
+             */
+            float act[SERVO_MAP_CHANNELS];
+            const bool produced = app_action_step(now_us / 1000, act);
+
+            if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
+                if (produced) {
+                    /* 自己留一份"上一帧输出"：POSE 那份 `s_state.current` 在任务体开头会被
+                     * 清零（宿主桩里 `vTaskDelayUntil()` 是 longjmp 让出点，任务体每次被驱动
+                     * 都从头进一次；真机上那段是死循环、不会重入，但"动作模式沿用上一帧输出"
+                     * 本来就不该搭在 POSE 的限速缓存上）。 */
+                    memcpy(s_action_last, act, sizeof(s_action_last));
+                    s_action_last_valid = true;
+                    memcpy(s_state.current, act, sizeof(s_state.current));
+                    ++s_stats.action_frames;
+                }
+                if (s_action_last_valid) {
+                    memcpy(snapshot, s_action_last, sizeof(snapshot));
+                } else {
+                    /* 还没有任何动作输出过：什么都不下发（也就不会把 0° 打给舵机） */
+                    have_out = false;
+                }
+                xSemaphoreGive(s_mutex);
+            } else {
+                have_out = false;
+            }
+            settled = true;   /* 动作模式下同样没有"是否到位"这个概念 */
         } else {
             if (xSemaphoreTake(s_mutex, portMAX_DELAY) == pdTRUE) {
                 if (s_state.target_valid) {
@@ -405,11 +470,13 @@ static void motion_task(void *arg)
         }
 
         /* ---- 4. 输出（servo_out 内部只写变化的通道） ---- */
-        const esp_err_t err = servo_out_apply_deg(snapshot);
-        if (err != ESP_OK) {
-            /* 单通道写失败已在 servo_out 里记日志，这里不中断控制循环 */
-            ESP_LOGW(TAG, "本帧有通道写入失败（%s），已跳过并在下一帧重试",
-                     esp_err_to_name(err));
+        if (have_out) {
+            const esp_err_t err = servo_out_apply_deg(snapshot);
+            if (err != ESP_OK) {
+                /* 单通道写失败已在 servo_out 里记日志，这里不中断控制循环 */
+                ESP_LOGW(TAG, "本帧有通道写入失败（%s），已跳过并在下一帧重试",
+                         esp_err_to_name(err));
+            }
         }
 
         /* ---- 5. 统计 ---- */
@@ -482,6 +549,8 @@ esp_err_t motion_init(void)
     }
 
     memset(&s_state, 0, sizeof(s_state));
+    memset(s_action_last, 0, sizeof(s_action_last));
+    s_action_last_valid = false;
     stats_reset();
     s_run   = false;
     s_estop = false;
@@ -542,6 +611,7 @@ void motion_stop(uint32_t reason)
 {
     if (!s_run) {
         /* 没在跑也要保证松力 */
+        s_action_last_valid = false;
         (void)servo_out_all_off();
         if (s_mutex != NULL && xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             s_stats.stop_reason = reason;
@@ -555,6 +625,10 @@ void motion_stop(uint32_t reason)
         s_stats.stop_reason = reason;
         xSemaphoreGive(s_mutex);
     }
+
+    /* 停车就忘记"上一帧动作输出"：重启后不会把上一次动作的姿态重新通电，
+     * 必须重新下 `action ...` 命令（松力态保持到那时为止） */
+    s_action_last_valid = false;
 
     s_run = false;
 

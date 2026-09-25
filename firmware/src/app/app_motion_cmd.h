@@ -9,14 +9,16 @@
  * | `motion period <ms>` | 运动任务周期（默认 10 ms = 100 Hz） |
  * | `motion rate <deg/s>` | 速率上限（默认 120 °/s，**只对 POSE 模式生效**） |
  * | `motion timeout <ms>` | 命令超时后松力停车（默认 10000 ms，0 = 关闭） |
- * | `motion mode pose\|chain` | 控制模式：直接 12 路角度 / 走控制链（步态） |
+ * | `motion mode pose\|chain\|action` | 控制模式：直接 12 路角度 / 走控制链（步态）/ 姿态动画 |
  * | `stand` | **原版真正的站姿**（走控制链 `cal_ges`→IK→`servo_output`） |
  * | `stand direct` | **标定用站姿**（12 路 = 中位角；与原版站姿不同，见核对清单 E8） |
+ * | `action stand\|sit\|sit_direct\|wave\|step\|stop` | 姿态动画 / 动作层（须先 `motion mode action`）<br>`stand`/`sit` = 动画，`wave` = 挥手脚本，`step` = 原版网页的"步态测试"，`stop` = 取消当前动作 |
  * | `gait trot\|walk` | 选步态（相位 `t` 归零） |
  * | `jog <spd> <L> <R>` | 行走命令，如 `jog -3 1 1`（前进）、`jog 3 1 1`（后退） |
  * | `turn <pct>` | 横杆转向百分比（`|pct| >= 10` 髋角才参与） |
  * | `chain` | 打印控制链状态（相位 / 目标 / 12 路角度与占空比） |
- * | `estop [原因]` | 急停：松力并停任务 |
+ * | `estop [原因]` | 急停：取消动作、松力并停任务 |
+ * | `action stop` | 只取消动作（**不松力**：松力用 `estop` / `motion stop`） |
  * | `lg <ch> <deg>` | **直接**设某逻辑通道的角度（要求控制任务已停） |
  * | `lg off` | 12 路全部无脉冲（松力） |
  * | `lgtest <ch> [delta]` | 单通道相对中位角偏移测试（硬件映射核对用） |
@@ -37,7 +39,7 @@ void app_motion_cmd_init(void);
 
 /**
  * @brief 处理一条 P2 命令。
- * @param cmd   命令名（`motion` / `estop` / `stand` / `lg` / `lgtest` / `readback`）
+ * @param cmd   命令名（`motion` / `estop` / `stand` / `action` / `lg` / `lgtest` / `readback`）
  * @param args  其余参数（可为 NULL）
  */
 void app_motion_cmd_handle(const char *cmd, const char *args);
