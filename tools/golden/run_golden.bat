@@ -113,6 +113,28 @@ gcc -O2 -Wall -Wextra -std=c11 ^
     "..\..\firmware\src\control\servo_map.c" -lm
 if errorlevel 1 goto :err
 
+rem App 层状态机：用 ESP-IDF 宿主桩（host_stubs/）+ **可控时钟**跑真实的 motion
+rem 任务循环，一路到 PCA9685 影子寄存器。验 App 层逻辑：节拍门控 / 站立姿态 /
+rem 急停 / 超时停车 / 模式切换 / 只写变化的通道。
+rem 桩是单线程、互斥锁恒成功 ⇒ 验不了死锁、优先级反转、栈深度、真实抖动。
+gcc -O2 -Wall -Wextra -std=c11 ^
+    -I"..\..\firmware\src" -Ihost_stubs ^
+    -o build\test_motion_app.exe ^
+    test_motion_app.c host_stubs\host_sim.c ^
+    "..\..\firmware\src\app\app_chain.c" ^
+    "..\..\firmware\src\app\app_config.c" ^
+    "..\..\firmware\src\app\motion.c" ^
+    "..\..\firmware\src\app\servo_out.c" ^
+    "..\..\firmware\src\drivers\drv_pca9685.c" ^
+    "..\..\firmware\src\control\control_chain.c" ^
+    "..\..\firmware\src\control\control_chain_cmd.c" ^
+    "..\..\firmware\src\control\kinematics.c" ^
+    "..\..\firmware\src\control\body_pose.c" ^
+    "..\..\firmware\src\control\gait_trot.c" ^
+    "..\..\firmware\src\control\gait_walk.c" ^
+    "..\..\firmware\src\control\servo_map.c" -lm
+if errorlevel 1 goto :err
+
 echo.
 echo [4/4] run
 build\test_kinematics.exe golden\ik.csv
@@ -140,6 +162,9 @@ build\test_control_chain.exe golden\control_chain.csv
 if errorlevel 1 set FAILED=1
 echo.
 build\test_control_chain_cmd.exe golden\control_chain_seq.csv golden\control_chain_seq_cmds.csv
+if errorlevel 1 set FAILED=1
+echo.
+build\test_motion_app.exe
 if errorlevel 1 set FAILED=1
 
 echo.
