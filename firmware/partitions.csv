@@ -1,0 +1,25 @@
+# Partition table for MechanicalDogUpgrade / firmware
+#
+# Why a custom table instead of the ESP-IDF default (partitions_singleapp.csv):
+#   The board has 4 MB of flash, but the default table gives the app only 1 MB.
+#   Once P5 pulled in WiFi + esp_http_server + lwIP + mbedtls, the image reached
+#   92.9% of that 1 MB (974425 of 1048576 bytes) -- about 74 KB of headroom left,
+#   which is not enough for the P6 arm and telemetry work still to come.
+#
+# Why NVS keeps its offset and size on purpose:
+#   nvs stays at 0x9000 with 0x6000 (24 KB) and factory still starts at 0x10000,
+#   so growing the app partition does NOT move NVS.  The calibration and WiFi
+#   settings already stored on the board therefore survive this change; only the
+#   app image is rewritten.  (app_config_nvs.h documents the same 0x9000/24 KB.)
+#
+# What this gives up:
+#   There are no ota_0 / ota_1 slots, so firmware updates are always over the
+#   serial port.  The original MicroPython project had no OTA either, and the
+#   migration table's acceptance criteria do not ask for one.
+#
+# Size check: 0x10000 + 0x200000 = 0x210000 (2.06 MB), well inside 4 MB.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  0x200000,

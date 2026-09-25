@@ -14,6 +14,7 @@
 #include "app/app_motion_cmd.h"
 #include "app/motion.h"
 #include "app/servo_out.h"
+#include "comm/net.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -247,6 +248,21 @@ static void selftest(void)
     app_motion_cmd_init();
 
     log_separator();
+    ESP_LOGI(TAG, "附加步骤：P5 传输层（WiFi 纯 AP + HTTP 服务 + 命令任务）");
+    {
+        /*
+         * ⚠️ 只在自检**全过之后**才起网络：`net.c` 会用 `motion_*` / `app_chain_*`，
+         * 而那些要 I2C 与 PCA9685 都初始化好了。自检失败时控制台照旧可用
+         * （可以敲 `scan` 重试、敲 `cfg` 看配置），只是没有网络。
+         */
+        const esp_err_t nerr = net_start();
+        if (nerr != ESP_OK) {
+            ESP_LOGE(TAG, "传输层启动失败: %s（控制台仍可用；可敲 `net status` 复查）",
+                     esp_err_to_name(nerr));
+        }
+    }
+
+    log_separator();
     ESP_LOGI(TAG, "自检完成。⚠️ 12 路舵机处于「无脉冲/松力」状态，控制任务未启动。");
 }
 
@@ -276,6 +292,9 @@ static void cmd_help(void)
     ESP_LOGI(TAG, "  cfg save                      写入 NVS（掉电重启仍生效）");
     ESP_LOGI(TAG, "  cfg load                      从 NVS 重新读取");
     ESP_LOGI(TAG, "  cfg reset                     恢复出厂默认并擦除 NVS");
+    ESP_LOGI(TAG, "  ---- 网络（P5：WiFi 纯 AP + HTTP）----");
+    ESP_LOGI(TAG, "  net status                    AP 名称/IP/客户端数 + 三个超时阈值");
+    ESP_LOGI(TAG, "  net counters                  邮箱计数（收下/被拒/序号丢/进HOLD/进RELAX/急停）");
     app_motion_cmd_help();
 }
 
@@ -541,6 +560,20 @@ static void handle_line(char *line)
                strcmp(cmd, "action") == 0) {
         /* P2/P3：固定周期运动、站姿、行走、急停、动作层、单通道映射核对 */
         app_motion_cmd_handle(cmd, args);
+    } else if (strcmp(cmd, "net") == 0) {
+        /* P5：WiFi 纯 AP + HTTP 服务的状态与计数（"断连自动停车"要能读回来才可信）*/
+        char sub[16];
+        size_t i = 0;
+        while (args[i] != '\0' && args[i] != ' ' && i < sizeof(sub) - 1) {
+            sub[i] = args[i];
+            ++i;
+        }
+        sub[i] = '\0';
+        const char *rest = args + i;
+        while (*rest == ' ') {
+            ++rest;
+        }
+        net_cmd_handle((sub[0] != '\0') ? sub : NULL, rest);
     } else {
         ESP_LOGW(TAG, "未知命令 '%s'，输入 help 查看用法", cmd);
     }

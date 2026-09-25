@@ -549,17 +549,17 @@ r.open("GET","f="+dy+"t="+dx)       // 108：同上
    `_send_full_page`）。`ss` 的**机器人侧**效果可以由 `pit=0;rol=0;ev=gc,g0` 表达，
    但"跳到标定页"是 Web 层的事，得在传输层做。
 4. **P6 机械臂只有"能表达"，没有行为**（`am1`/`am0`/`grip`）。
-5. ⚠️ **`comm/proto.c` 与 `comm/web_cmd.c` 目前还没进固件镜像。**
-   它们被 `src/CMakeLists.txt` 的 `FILE(GLOB_RECURSE)` 编成了 `.o`
-   （`.pio/build/espdev/src/comm/{proto,web_cmd}.o` 都在），但**因为固件里还没有
-   任何地方调用它们**，链接器按死代码把它们回收了 —— 用
-   `xtensa-esp32-elf-nm firmware.elf` 查 `proto_decode` / `web_cmd_*`
-   **一个符号都没有**（Flash 只涨了 660 字节，也是这个原因）。
-   ⇒ 所以现在说"P5 协议层做完了"**只能指"宿主测试全绿"**，
-   **不能**指"固件里有这个功能"。等传输层（WiFi AP + HTTP + 命令队列）
-   真的调用它们，符号才会进镜像。
-   ⚠️ 这正是 P-29 那一族的形态（代码在、测试绿、但没被调用到），
-   所以**每次都要用 `nm` 确认符号到底在不在镜像里**，不能只看 `[SUCCESS]`。
+5. ✅ **已解决（原本是本条最大的一个坑）**：`comm/proto.c` 与 `comm/web_cmd.c`
+   一开始**编进了 `.o` 却不在镜像里** —— 因为固件里没有任何地方调用它们，
+   链接器按 `--gc-sections` 整体回收了（`nm firmware.elf` 查 `proto_decode` /
+   `web_cmd_*` 一个符号都没有，Flash 只涨 660 B）。
+   传输层接上之后用 `nm` 复查：**8 个 `comm/` 符号全部在镜像里**，
+   且 `net_start` / `comm_task` 从 `app_main` 可达。
+   ⇒ 保留这条记录，因为**`pio run` 的 `[SUCCESS]` 不能证明这一点，只有 `nm` 能** ——
+   P-29 那一族的形态（代码在、测试绿、但没被调用到）。
+6. **标定事件（`l1`–`l4`、`hi/hd/si/sd/ip/id`）与 `sc`/`am*` 只回一条明确日志，
+   没有落行为**：它们要的是**配置写入**通道（`app_config_validate` + NVS），
+   属于上面第 1 条那个"配置帧"该干的事。事件本身协议层都认，只是本阶段没接线。
 
 ⚠️ 还有一条**设计上的取舍**要知道：老页面格式与严格格式**共用同一张字段表和
 同一套范围校验**，但在**取值宽容度**上不同 —— 老路径沿用原版 `_leading_int()`
@@ -567,6 +567,61 @@ r.open("GET","f="+dy+"t="+dx)       // 108：同上
 规范整数（不许 `+`、不许前导零、不许尾部垃圾）。
 **宽容只存在于值的尾部**；键名、键序、范围、事件名两条路径都严格。
 ⇒ 这是为了让用户手上那个页面在板子上还能用（见 `(9)`），**不是**放宽 §8.2/§8.3。
+
+### (11) 传输层已落地（`comm/cmd_queue.*` 与 `comm/net.*`）
+
+数据流与归属（`comm/net.c` 的头注释里有图）：
+
+```text
+浏览器 ─HTTP─> httpd 任务 ──① proto_decode*()  解析+校验（白名单/范围/seq/限速）
+                          ──② proto_peek_estop() 急停旁路（整帧被拒也生效）
+                          ──③ cmd_queue_post()   放进**单槽邮箱**
+                                    ▼（互斥锁）
+             comm 任务 100 Hz ──> cmd_queue_tick()
+                          │ FRESH → web_cmd_process_request() → app_chain_* / motion_*
+                          │ HOLD  → 输入归零、保持姿态（= btn_stop 语义）
+                          │ RELAX → motion_stop(超时) 放松舵机
+                                    ▼
+             控制任务 100 Hz → servo_out → I2C → PCA9685
+```
+
+- **纯 C 的那一半**（`cmd_queue`）负责存活策略，**有 200 条宿主断言** ——
+  "断连自动停车"这条验收标准就落在它身上。边界**两侧都测**
+  （`age == hb` 与 `hb+1`、`long` 与 `long+1`）、序号回绕、49.7 天 `now_ms` 回绕、
+  以及"急停不能被一次读不到就解除"。
+- **IDF 的那一半**（`net.c`）只做搬运与落命令，**httpd 任务里不碰舵机、不做数学**
+  （§8.1/§8.6）。
+- **两级超时的 owner 只有一个**：短 250 ms / 长 2 s 归 `cmd_queue`；
+  `motion` 自己的命令超时被设成 **3 s**，故意更长，只兜底"comm 任务自己卡死"。
+  三层阈值的先后顺序是**设计的一部分**，不是巧合。
+- ⚠️ **`§0.5(8b)` 那处分歧已经在接线里修好了**：`web_cmd` 本身仍然不清动作层的
+  `inplace_step_end_ms`（那是它的契约，`test_web_cmd` 钉着），
+  由 `net.c` 在走完原地踏步分支后补一次 `app_action_set_inplace_step_end_ms(0)`
+  —— 于是**端到端行为**与原版一致（"网页原地步态测试只生效一帧"）。
+
+#### ⚠️ 顺带必须改的一件事：分区表（1 MB app 装不下）
+
+接上 WiFi + `esp_http_server` + lwIP + mbedtls 之后，镜像从 342 KB 涨到 **974 KB**，
+而 IDF 默认给 app 的只有 **1 MB** ⇒ **92.9%**，只剩约 74 KB，P6 一定装不下。
+
+⇒ 加了 `firmware/partitions.csv`：**app 从 1 MB 扩到 2 MB**（Flash 占用回到 46.5%）。
+**`nvs` 的偏移与大小刻意保持不变**（0x9000 / 24 KB），`factory` 仍从 0x10000 起
+⇒ **板上已经存好的配置不会丢**，只有 app 镜像被重写。
+
+⇒ 代价：没有 OTA 双槽（只能串口升级）。原版也没有 OTA，验收标准里也没有它。
+⚠️ **这条要告诉用户**：换分区表后第一次烧录，建议确认一下 `cfg info` 里
+NVS 里的值还在（按设计在，但要亲眼看到）。
+
+#### 控制台新增
+
+```text
+net status      AP 名称/IP/客户端数 + 三个超时阈值
+net counters    邮箱计数：收下 / 协议拒 / 序号丢 / 进HOLD / 进RELAX / 急停 / tick
+```
+
+⇒ 新增这两个命令的原因是 `(7)` 最后那条：**计数必须能读回来**，
+否则"断连自动停车"在真机上没法证明，只能宣称。
+浏览器侧对应 `GET /status`（纯文本，含 mode/running/estopped/link 状态与同样这些计数）。
 
 ## 1. 当前 MicroPython 控制链
 

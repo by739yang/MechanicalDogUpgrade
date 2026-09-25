@@ -261,6 +261,20 @@ gcc -O2 -Wall -Wextra -Werror -std=c11 ^
     "..\..\firmware\src\control\servo_map.c" -lm
 if errorlevel 1 goto :err
 
+rem Command queue / liveness policy (comm/cmd_queue.c): the single-slot mailbox and
+rem the TWO-STAGE timeout (short -> zero the inputs, keep the pose; long -> release
+rem the servos).  This is where the acceptance criterion "disconnect stops the dog"
+rem actually lives, so the suite hammers both sides of every freshness boundary,
+rem seq wrap-around, and the fact that an e-stop cannot be cleared by failing to
+rem read it.
+gcc -O2 -Wall -Wextra -Werror -std=c11 ^
+    -I"..\..\firmware\src" -Ihost_stubs ^
+    -o build\test_cmd_queue.exe ^
+    test_cmd_queue.c ^
+    "..\..\firmware\src\comm\cmd_queue.c" ^
+    "..\..\firmware\src\comm\proto.c" -lm
+if errorlevel 1 goto :err
+
 echo.
 echo [4/4] run
 build\test_kinematics.exe golden\ik.csv
@@ -306,6 +320,9 @@ build\test_action_crawl.exe golden\action_crawl.csv
 if errorlevel 1 set FAILED=1
 echo.
 build\test_web_cmd.exe golden\web_cmd.csv
+if errorlevel 1 set FAILED=1
+echo.
+build\test_cmd_queue.exe
 if errorlevel 1 set FAILED=1
 
 echo.
