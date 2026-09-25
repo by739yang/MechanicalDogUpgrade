@@ -527,3 +527,50 @@ app_config 默认值 -> app_chain -> control_chain(+cmd) -> servo_map
 
 > 💡 顺带实测到一个行为事实：**站姿要约 9 秒才稳定**（渐近 slew，`Kp_G=0.03`）。
 > 上板测试别"等 1 秒就下结论"。
+
+### action ← `padog.py` 的动作 / 姿态层（**P3 第 1 步**）
+
+```
+action_pose       : pose tables / blend / direct 12 writes       （容差 0，角度 + 占空比）
+action_cmd        : action_stand / sit / sit_direct 入口 + mainloop 对照
+                    比较 12 路角度/占空比 + **22 个模块级全局量的后置值**
+action_wave       : 挥手脚本 565 次写、按时间戳分 54 组
+action_wave_final : 挥手结束后的 23 个终态字段
+
+RESULT: PASS -- pose tables, action entries and the whole wave script match padog.py exactly
+```
+
+参考值同样是**执行真版 `padog.py`**（`load_padog_ns()`）。这一套比前面的都"刁"，
+因为它对照的东西**不是纯函数**：
+
+| 被对照的东西 | 为什么必须测 |
+|---|---|
+| 12 路角度（不只是占空比） | 原版 `_apply_stand_angles_direct` **只夹髋、不夹腿**；把 12 路都夹了，**占空比一模一样**（0 处差异），只有角度看得出 4 处失配 ⇒ PWM 对照对这个 bug 是瞎的 |
+| **22 个模块级全局量的后置值** | `action_stand()` 会通过 `move()`/`gait()`/`gesture()` 改 `spd/L/R/gait_mode/PIT_goal/...`。丢掉 `gesture(0,0,in_y)` 时**舵机输出逐字节相同**，只有状态量抓出 2 处 ⇒ 副作用只有状态转储看得见（成长手册 P-25 的教训） |
+| 时钟 | 原版读 `utime.ticks_ms()`。参考侧用 `mpy_stubs.install_controllable_clock()` 换成**可控计数器**（语义与原版一致的整数毫秒 + 环绕安全差值），只在最后一步装，所以前面那些套件的 CSV 不受影响 |
+
+**刻意没搬的**：`action_crawl()` 只是"爬行命令入口"，爬行状态机已经在
+`control_chain.c` 里 ⇒ 两边都管 `crawl_phase` 会打架；`mainloop()` 里
+`direct_pose_freeze` 之后的部分属于调度与控制链，不属于本层。
+
+**顺带记录两个原版的真实行为**（照原样复刻，没有"顺手修"）：
+1. `mainloop()` 里的 `move(3,1,1)` **自己会清掉 `inplace_step_end_ms`** ⇒
+   网页那个"原地步态测试"实际上**只有一帧**。
+2. `pose_blend_ms` **在任何地方都没有定义**（config、注入表都没有）⇒
+   `except: return 900` 的兜底就是**实际生效**的那条路（在真版命名空间里求值确认为 900，
+   不是靠搜索得出的）。
+
+### ⚠️ `run_golden.bat` 必须是 CRLF 行尾
+
+cmd.exe 对 **LF-only** 的批处理会**误解析**：`^` 续行被拆开、`goto :err` 不再被识别、
+gcc 命令行的碎片被当命令执行 —— 而脚本**照样会打印 `ALL GOLDEN TESTS PASSED`**
+（因为恰好有旧的 exe 在）。**那是脚本层的假通过。**
+
+两重防护：
+1. 文件现在是 **CRLF 且 0 个非 ASCII 字节**（`.bat` 里混中文是 P-01 那类隐患），
+   顶部有一段英文 `rem` 警示；
+2. **开头就 `del /q build\*.exe`** —— 这样"编译失败被陈旧二进制掩盖"在结构上不可能。
+
+> 任何用 LF 重写这个文件的工具都会把它弄坏。改动后用 `cmd /c run_golden.bat`
+> 从**删掉 exe 的状态**验一遍，并检查输出里没有
+> `is not recognized` 之类的杂散错误。

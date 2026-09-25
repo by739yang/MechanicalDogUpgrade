@@ -108,7 +108,9 @@ typedef struct {
     /** 中位角 `[腿][关节]`，腿 0..3 = 腿1..腿4，关节 0=髋 1=大腿 2=小腿。
      *  config_s.py: `init_1p=102 / init_1h=84 / init_1s=92 / init_2p=96 / init_2h=91 /
      *  init_2s=85 / init_3p=108 / init_3h=78 / init_3s=68 / init_4p=92 / init_4h=98 /
-     *  init_4s=102`。与 `control_chain_cfg_t.init` 同源同序。 */
+     *  init_4s=102`。与 `control_chain_cfg_t.init` 同源同序。
+     *  ⚠️ `padog.py` 第 53~56 行的 `"init_%dp" = 90` 是**兜底**（只在 config 没定义时生效），
+     *  config_s.py 把 12 个全定义了 ⇒ **兜底不生效**，所以不是 90 而是上面这组值。 */
     float init[ACTION_LEGS][ACTION_JOINTS];
 
     /* ---------------- 原实现里的字面量 ---------------- */
@@ -130,8 +132,11 @@ typedef struct {
     /** `action_sit_direct()` 里的 `height(86)`（`padog.py:801`）。坐下时的站高目标 */
     float sit_height;
 
-    /** `gait(0)` 复位重心目标用的三个 config 值。config_s.py: `in_pit=0 in_rol=0 in_y=18`。
-     *  ⚠️ `action_stand()` 里的 `gesture(0, 0, in_y)` 与随后的 `gait(0)` 都写
+    /** `gait(0)` 复位重心目标用的三个 config 值。
+     *  `in_pit` / `in_rol`：config_s.py 与 `padog.py` 第 58 行的默认值注入表里**都有 0**
+     *  （config_s 先执行，值一样，所以看不出差别）。
+     *  `in_y`：config_s.py 的 18 —— ⚠️ **注入表里没有 `in_y`**，所以它只来自 config 文件。
+     *  `action_stand()` 里的 `gesture(0, 0, in_y)` 与随后的 `gait(0)` 都写
      *  PIT/ROL/X 目标，**前者用 0/0，后者用 int(in_pit)/int(in_rol)/int(in_y)** ——
      *  所以效果表的顺序不能合并。 */
     float in_pit;
@@ -176,10 +181,18 @@ typedef struct {
 /**
  * @brief 填入**这台机器**的实际生效值。
  *
- * 与 `control_chain_cfg_defaults()` 同一套取法：`config_s.py` 里有的用它，
- * 没有的用 `padog.py` 第 57~81 行默认值注入表的兜底值，再没有的用原实现的字面量。
+ * 与 `control_chain_cfg_defaults()` 同一套取法，逐字段来源：
  *
- * `init` 与 `action_cfg_t` 的其余字段的来源逐条写在结构体注释里。
+ * | 字段 | 来源 |
+ * |---|---|
+ * | `init` | `config_s.py`（它定义了全部 12 个，所以注入表的 `init_%dp=90` 兜底**不生效**） |
+ * | `sit_delta` | `padog.py:706~709` 的字面量 |
+ * | `pose_blend_ms` | `_pose_blend_ms()` 的 **except 兜底值 900**（那个全局从未被定义） |
+ * | `sit_height` | `padog.py:801` 的 `height(86)` 字面量 |
+ * | `in_pit` / `in_rol` | `config_s.py`（注入表第 58 行也有同样的 0） |
+ * | `in_y` | `config_s.py` 的 18（⚠️ 注入表里**没有** `in_y`） |
+ * | `inplace_*` | `padog.py:885` 的 `move(3, 1, 1)` 字面量 |
+ * | `anim_wait_step_ms` / `wave_*` | `padog.py:766 / 838~854` 的字面量 |
  *
  * @param cfg 目标（为 NULL 时不做任何事）
  */

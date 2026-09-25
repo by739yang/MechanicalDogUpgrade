@@ -1,4 +1,4 @@
-# HANDOFF：MechanicalDogUpgrade 代码移植交接文档
+﻿# HANDOFF：MechanicalDogUpgrade 代码移植交接文档
 
 > 更新时间：2026-09-11（正文）／2026-09-19（最新状态见下方）
 > 用途：下一轮新对话开始 ESP-IDF C 版本移植时，先完整阅读本文件，再阅读 `ESP-IDF_C迁移表.md` 和 `micropython/` 下的原始代码。
@@ -37,6 +37,7 @@
 | 节拍 | 链节拍算术（65 ms、不追补） | 🟢 | `test_control_chain_cmd` 内断言 + `Ts/speed=15.38 帧=1000 ms` | **只是算术**；真实调度抖动要上板 |
 | App 层 | `app_chain` / `motion` 状态机（模式切换、急停、超时、门控） | 🟢 | **`test_motion_app`（ESP-IDF 宿主桩 + 可控时钟）37 条断言**，一路跑到 PCA9685 影子寄存器 | **单线程桩** ⇒ 查不出死锁/优先级反转/栈深度/真实抖动 |
 | App 层 | 站立姿态（整链 → 影子寄存器） | 🟢 | 同上：收敛后与 `control_chain.csv` 第 1 行最大差 **1 个计数单位** | 差 1 是渐近 slew 停在浮点精度上，不是 bug |
+| 动作层 | `action_stand/sit/wave` + 姿态动画 + 原地踏步 | 🟢 | `test_action` 容差 0：姿态表/混合/直写、入口函数、**挥手脚本 565 次写**；并比对 **22 个模块级全局量的后置值**（副作用只有状态转储看得见，P-25） | **单线程桩**；`action_crawl` 刻意归 `control_chain` 管（避免两个 owner） |
 | 驱动 | `drv_pca9685` 寄存器编解码 | 🟢 | 编码端被 `servo_map` golden 与 `test_motion_app` 的影子寄存器双重钉住；P-21 的 `&0x1F` 修正 🔵 真机 `readback` 验证 | 真实 I2C 时序未验 |
 | BSP | `bsp_i2c` 总线/扫描/互斥锁 | 🔵 | 真机：位操作扫描 112 地址 21 ms 命中 3 个 | `bsp_i2c_lock` 的并发行为**没验过** |
 
@@ -63,7 +64,7 @@ slew 是 `X_S += |X_S - X_goal| * Kp_G`（`Kp_G = 0.03`）—— **渐近逼近*
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 动作层（`action_stand/sit/crawl/wave` + 姿态动画 + 原地踏步） | ⚪ | 一行都没迁（第 1 步要做） |
+| 动作层 | 🟢 **已迁并宿主验证**（`action.c`，`test_action` 容差 0） | 可视化尚未接（可把动作也导进同一套 HTML） |
 | Web / 通信（纯 AP、HTTP、WebSocket、命令协议） | ⚪ | 第 2 步 |
 | 机械臂（`mech_arm.py`） | ⚪ | 第 3 步 |
 | IMU / 稳定闭环 | ⛔ | 本机无 IMU（决策 F1=A） |
