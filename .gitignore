@@ -1,4 +1,4 @@
-# Local secrets
+﻿# Local secrets
 config.py
 config.local.py
 secrets.h
@@ -43,3 +43,9 @@ sdkconfig.old
 sdkconfig.esp32dev
 dependencies.lock
 managed_components/
+# 可视化的编译产物与中间数据（可由源码重建）
+tools/viz/*.exe
+tools/viz/chain_trace.csv
+
+# 一次性探针脚本（用完即删，不进仓库）
+tools/golden/_proto*.py
