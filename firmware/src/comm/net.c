@@ -38,8 +38,10 @@ static const char *TAG = "net";
 #define NET_AP_CHANNEL       1
 #define NET_AP_MAX_CONN      4
 #define NET_COMM_TASK_HZ     100
-#define NET_MOTION_BACKSTOP_MS 3000u   /**< 故意**长于**长超时：只兜底"comm 任务自己卡死" */
 #define NET_MIN_INTERVAL_MS  10u       /**< 100 Hz 上限（§7 的目标是 20~50 Hz）*/
+/* ⚠️ 原来还有一个 `NET_MOTION_BACKSTOP_MS`（3 秒），已经**删掉**：
+   它是第二个超时 owner，会在网页轮询一停的时候就终止控制任务，且不可恢复。
+   现在超时 owner 只有 `cmd_queue` 的两级策略，见 `net_start()` 里的长注释。 */
 
 /* ==========================================================================
  * 状态
@@ -278,6 +280,7 @@ static void comm_task(void *arg)
 
     uint32_t last_applied_accepted = 0;
     bool     has_applied = false;
+    bool     stopped_motion = false;   /**< RELAX 时是我们把控制任务停掉的 */
 
     for (;;) {
         const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
@@ -302,6 +305,28 @@ static void comm_task(void *arg)
                 motion_estop("网络急停");
                 break;
             }
+
+            /*
+             * 客户端回来了：如果上一轮 RELAX 是我们把控制任务停掉的，
+             * 这里必须**重新拉起来**。
+             *
+             * ⚠️ 少了这一步，"断连 → 放松"之后就**永久失效**：任务已经退出，
+             *    而没有任何别的地方会再调 `motion_start()`。真机上就是这个
+             *    现象 —— 网页还在发命令、`accepted` 还在涨，但 12 路一直松力，
+     *    摇杆看起来完全没反应。
+             *
+             * ⚠️ 急停**不会**走这条路自动复活：`cmd_queue` 里的急停是**闩锁**的，
+             *    状态会一直停在 RELAX，必须显式 `cmd_queue_clear_estop()` 才能回到
+             *    FRESH。所以"按了急停之后自己站起来"不会发生。
+             */
+            if (stopped_motion) {
+                stopped_motion = false;
+                if (!motion_is_running()) {
+                    ESP_LOGW(TAG, "客户端回来了：重新启动控制任务");
+                    (void)motion_start();
+                }
+            }
+
             /*
              * 只在**换了新命令**时应用，避免 100 Hz 重复下发同一条。
              *
@@ -343,6 +368,8 @@ static void comm_task(void *arg)
                     ESP_LOGE(TAG, "断连超过 %u ms：放松舵机（安全态）",
                              (unsigned)s_q.long_ms);
                     motion_stop(MOTION_STOP_TIMEOUT);
+                    /* 记下来：客户端回来时要把它重新拉起来（见 CMD_QUEUE_FRESH）*/
+                    stopped_motion = true;
                 }
                 has_applied = false;     /* 下次连上要重新应用一次 */
             }
@@ -494,11 +521,24 @@ static esp_err_t handler_get(httpd_req_t *req)
         return send_status(req);
     }
     if (strcmp(uri, "/") == 0 || strcmp(uri, "/index.html") == 0 ||
-        strcmp(uri, "/drive.html") == 0) {
-        return send_page(req, kPageDrive, kPageDrive_LEN);
-    }
-    if (strcmp(uri, "/control.html") == 0) {
+        strcmp(uri, "/control.html") == 0) {
+        /*
+         * ⚠️ 根路径服务 `control.html`（**完整控制页**），不是 `drive.html`。
+         *
+         * 依据是原版的 `micropython/main.py`：
+         *   `web_ui_mode = 1` → `web_c.py` + `control.html`（完整控制/标定）
+         *   `web_ui_mode = 0` → `web_ctl.py` + `drive.html`（轻量遥控页）
+         * 板子上实际跑的是 **mode 1**，所以用户看到的、记住的就是 `control.html`。
+         *
+         * 这一条踩过一次：一开始根路径给的是 `drive.html`，用户立刻发现
+         * "控制页面和原来版本不一样、机械臂度数都没有了" —— 因为轻量页确实
+         * 没有机械臂开关、夹爪和姿态滑条。**用户对界面的记忆是权威的**，
+         * 而它当时给出的信号比任何测试都早。
+         */
         return send_page(req, kPageControl, kPageControl_LEN);
+    }
+    if (strcmp(uri, "/drive.html") == 0) {
+        return send_page(req, kPageDrive, kPageDrive_LEN);
     }
     if (strcmp(uri, "/cal.html") == 0) {
         return send_page(req, kPageCal, kPageCal_LEN);
@@ -742,11 +782,23 @@ esp_err_t net_start(void)
     }
 
     /*
-     * motion 自己的命令超时当**兜底**：一定要**长于** cmd_queue 的长超时，
-     * 这样正常路径上永远是 cmd_queue 先决定"放松"，motion 的兜底只在
-     * comm 任务自己卡死时才会触发（见 net.h 里的顺序说明）。
+     * ⚠️ **关掉 motion 自己的命令超时**（= 0）—— 这是真机上抓到的设计错误。
+     *
+     * 一开始这里设了 3 秒当"兜底"，想法是"comm 任务卡死时还能停"。实测结果是：
+     * 网页轮询一停（哪怕只是客户端在等站姿收敛那 12 秒没发命令），motion 自己的
+     * 3 秒超时就先触发 → **控制任务直接退出** → 之后重新连上**再也起不来**
+     * （没有任何东西会再调 `motion_start()`），所以摇杆彻底失效。
+     * 真机日志：
+     *   W (365080) motion: 命令超时（3003 ms > 3000 ms）：松力停车
+     *   W (365089) motion: 控制任务结束，原因: 命令超时
+     *
+     * ⇒ **超时只能有一个 owner：`cmd_queue` 的两级策略**（短 250 ms 归零输入、
+     *    长 2 s 放松）。motion 的兜底是第二个 owner，它和两级策略打架，
+     *    而且它采取的动作（终止任务）**不可恢复**。
+     * ⇒ 重新连上的恢复由 `comm_task` 负责：状态从 RELAX 回到 FRESH 时重新
+     *    `motion_start()`（见那里的注释）。
      */
-    (void)motion_set_timeout_ms(NET_MOTION_BACKSTOP_MS);
+    (void)motion_set_timeout_ms(0);
 
     if (xTaskCreate(comm_task, "net_cmd", 4096, NULL, 6, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "建命令任务失败");
@@ -754,10 +806,10 @@ esp_err_t net_start(void)
     }
 
     s_up = true;
-    ESP_LOGI(TAG, "传输层就绪：httpd :%d，命令任务 %d Hz，心跳 %u/%u ms，motion 兜底 %u ms",
+    ESP_LOGI(TAG, "传输层就绪：httpd :%d，命令任务 %d Hz，心跳 %u/%u ms，"
+                  "motion 自身超时已关闭（超时 owner 只有 cmd_queue）",
              NET_HTTP_PORT, NET_COMM_TASK_HZ,
-             (unsigned)s_q.hb_ms, (unsigned)s_q.long_ms,
-             (unsigned)NET_MOTION_BACKSTOP_MS);
+             (unsigned)s_q.hb_ms, (unsigned)s_q.long_ms);
     return ESP_OK;
 }
 
@@ -786,9 +838,9 @@ void net_cmd_handle(const char *sub, const char *args)
         ESP_LOGI(TAG, "AP    : ssid=\"%s\" ip=%s clients=%u",
                  app_cfg_cmd_get()->ap_ssid, net_ip_str(),
                  (unsigned)net_client_count());
-        ESP_LOGI(TAG, "阈值  : 心跳 %u ms，放松 %u ms，motion 兜底 %u ms",
-                 (unsigned)s_q.hb_ms, (unsigned)s_q.long_ms,
-                 (unsigned)NET_MOTION_BACKSTOP_MS);
+        ESP_LOGI(TAG, "阈值  : 心跳 %u ms（归零输入、保持姿态），放松 %u ms（松力停车）",
+                 (unsigned)s_q.hb_ms, (unsigned)s_q.long_ms);
+        ESP_LOGI(TAG, "        motion 自身超时已关闭 —— 超时 owner 只有 cmd_queue");
         return;
     }
 
