@@ -1,242 +1,239 @@
 [   0.00s] 已打开 COM4 @ 115200（全程保持打开：关串口会复位板子）
-[   1.51s] 等待 AP 可达（最多 600 秒）—— 请现在把电脑连到 WiFi RobotDog
-[  34.62s]   仍在等待…（已等 33 秒）
-[  69.72s]   仍在等待…（已等 68 秒）
-[ 104.85s]   仍在等待…（已等 103 秒）
-[ 139.96s]   仍在等待…（已等 138 秒）
-[ 175.06s]   仍在等待…（已等 174 秒）
-[ 210.16s]   仍在等待…（已等 209 秒）
-[ 245.27s]   仍在等待…（已等 244 秒）
-[ 280.37s]   仍在等待…（已等 279 秒）
-[ 315.47s]   仍在等待…（已等 314 秒）
-[ 335.19s] AP 已可达 ✔
-[ 335.19s]     /status | ip=192.168.4.1 clients=1 up=1
-[ 335.19s]     /status | mode=POSE running=0 estopped=0 stop_reason=无（还在运行）
-[ 335.19s]     /status | link=IDLE age_ms=4294967295 hb_ms=250 long_ms=2000
-[ 335.19s]     /status | q: accepted=0 rejected=0 dropped_seq=0 hold=0 relax=0 estop=0 ticks=33371
-[ 335.19s]     /status | motion: ticks=0 overruns=0 period_us=0 work_us=0 i2c_writes=0
-[ 335.19s] 
-[ 335.19s] === ① 基线 readback（期望 12 路全 OFF=4096 松力）===
-[ 335.19s] SERIAL >>> readback
-[ 337.20s]     I (334222) wifi:new:<1,1>, old:<1,1>, ap:<1,1>, sta:<255,255>, prof:1
-[ 337.20s]     I (334223) wifi:station: ac:f2:3c:c5:4e:b7 join, AID=1, bgn, 40U
-[ 337.20s]     I (334242) wifi:<ba-add>idx:2 (ifx:1, ac:f2:3c:c5:4e:b7), tid:0, ssn:1, winSize:64
-[ 337.20s]     I (334712) esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.4.2
-[ 337.20s]     I (335190) p0: > readback
-[ 337.20s]     I (335192) p2: 回读 12 路寄存器：
-[ 337.20s]     I (335195) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335197) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335205) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335212) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335220) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335228) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335236) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335243) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335251) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335259) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335267) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335274) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=4096  (无脉冲/松力)
-[ 337.20s]     I (335281) p2: 读回完成，失败 0 路
-[ 337.20s] 解析到 12 路；全部松力 = True
-[ 337.20s] 
-[ 337.20s] === ② 起控制链与运动任务（摇杆居中、持续发送）===
-[ 337.21s] 持续发送线程已启动（~10 Hz，f=0）
-[ 337.21s] SERIAL >>> motion mode chain
-[ 338.42s]     I (337208) p0: > motion mode chain
-[ 338.42s]     I (337208) motion: 控制模式 = CHAIN (控制链/步态)
-[ 338.42s]     I (337208) p2: motion mode chain -> ESP_OK
-[ 338.42s]     I (337644) esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.4.2
-[ 338.42s] SERIAL >>> motion start
-[ 340.43s]     I (338421) p0: > motion start
-[ 340.43s]     I (338422) motion: 控制任务启动: 周期 10 ms (100 Hz), 速率上限 120 °/s, 超时 0 ms（已关闭）
-[ 340.43s]     I (338426) p2: motion start -> ESP_OK
-[ 340.43s] 等站姿收敛 12 秒（全程持续发送）...
-[ 352.43s] 
-[ 352.43s] === ③ 静止对照：摇杆居中，连读两次 ===
-[ 352.43s] SERIAL >>> readback
-[ 354.44s]     I (341527) esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.4.2
-[ 354.44s]     W (343973) net: 心跳超时（>250 ms）：输入归零，保持姿态
-[ 354.44s]     I (347419) esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.4.2
-[ 354.44s]     I (348423) motion: 统计: ticks=1001 模式=CHAIN 周期 us(avg/max)=9990/11856 抖动max=7040 us 干活 us(avg/max)=230/10141 超期=0 I2C写=64 链帧=155 动作帧=0 已到位=是
-[ 354.44s]     I (352433) p0: > readback
-[ 354.44s]     I (352434) p2: 回读 12 路寄存器：
-[ 354.44s]     I (352435) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=333
-[ 354.44s]     I (352437) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=402
-[ 354.44s]     I (352444) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=424
-[ 354.44s]     I (352449) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=311
-[ 354.44s]     I (352455) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=434
-[ 354.44s]     I (352460) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=446
-[ 354.44s]     I (352466) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=320
-[ 354.44s]     I (352472) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=199
-[ 354.44s]     I (352478) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=181
-[ 354.44s]     I (352485) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=347
-[ 354.44s]     I (352490) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=169
-[ 354.44s]     I (352496) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=143
-[ 354.44s]     I (352501) p2: 读回完成，失败 0 路
-[ 355.94s] SERIAL >>> readback
-[ 357.95s]     W (355213) net: 心跳超时（>250 ms）：输入归零，保持姿态
-[ 357.95s]     I (355945) p0: > readback
-[ 357.95s]     I (355946) p2: 回读 12 路寄存器：
-[ 357.95s]     I (355949) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=333
-[ 357.95s]     I (355950) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=402
-[ 357.95s]     I (355955) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=424
-[ 357.95s]     I (355961) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=311
-[ 357.95s]     I (355967) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=434
-[ 357.95s]     I (355973) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=446
-[ 357.95s]     I (355979) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=320
-[ 357.95s]     I (355985) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=199
-[ 357.95s]     I (355991) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=181
-[ 357.95s]     I (355997) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=347
-[ 357.95s]     I (356002) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=169
-[ 357.95s]     I (356008) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=143
-[ 357.95s]     I (356013) p2: 读回完成，失败 0 路
-[ 357.96s] 居中止静时两次 readback 不同的通道 = 无（期望：空）
-[ 357.96s] 
-[ 357.96s] === ④ 推杆：持续发送的值改为 f=80，等 3 秒后连读两次 ===
-[ 360.96s] SERIAL >>> readback
-[ 362.97s]     I (358433) motion: 统计: ticks=2002 模式=CHAIN 周期 us(avg/max)=9995/11856 抖动max=7040 us 干活 us(avg/max)=211/10141 超期=0 I2C写=101 链帧=309 动作帧=0 已到位=是
-[ 362.97s]     I (360958) p0: > readback
-[ 362.97s]     I (360959) p2: 回读 12 路寄存器：
-[ 362.97s]     I (360960) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=333
-[ 362.97s]     I (360962) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=378
-[ 362.97s]     I (360968) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=423
-[ 362.97s]     I (360974) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=311
-[ 362.97s]     I (360980) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=445
-[ 362.97s]     I (360986) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=499
-[ 362.97s]     I (360993) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=320
-[ 362.97s]     I (360998) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=196
-[ 362.97s]     I (361003) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=167
-[ 362.97s]     I (361009) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=347
-[ 362.97s]     I (361015) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=195
-[ 362.97s]     I (361021) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=144
-[ 362.97s]     I (361028) p2: 读回完成，失败 0 路
-[ 362.97s] SERIAL >>> readback
-[ 364.98s]     I (362972) p0: > readback
-[ 364.98s]     I (362972) p2: 回读 12 路寄存器：
-[ 364.98s]     I (362974) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=333
-[ 364.98s]     I (362976) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=377
-[ 364.98s]     I (362982) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=423
-[ 364.98s]     I (362988) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=311
-[ 364.98s]     I (362995) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=443
-[ 364.98s]     I (362999) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=490
-[ 364.98s]     I (363005) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=320
-[ 364.98s]     I (363011) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=192
-[ 364.98s]     I (363019) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=172
-[ 364.98s]     I (363023) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=347
-[ 364.98s]     I (363029) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=196
-[ 364.98s]     I (363035) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=144
-[ 364.98s]     I (363040) p2: 读回完成，失败 0 路
-[ 364.98s] 推杆时两次 readback 不同的通道 = [1, 4, 5, 7, 8, 10]（期望：非空）
-[ 364.98s] 发送线程统计：成功 137 条 / 失败 0 条
-[ 364.98s] 推杆 vs 静止 的整体差异通道 = [1, 2, 4, 5, 7, 8, 10, 11]
-[ 364.98s] 
-[ 364.98s] === ⑤ 断连：停掉发送线程，等 3 秒，读计数 ===
-[ 368.17s] SERIAL >>> net counters
-[ 370.18s]     W (365263) net: 心跳超时（>250 ms）：输入归零，保持姿态
-[ 370.18s]     E (367013) net: 断连超过 2000 ms：放松舵机（安全态）
-[ 370.18s]     W (367030) motion: 控制任务结束，原因: 命令超时
-[ 370.18s]     I (368174) p0: > net counters
-[ 370.18s]     I (368174) net: 链路状态: RELAX（距上一帧 3166 ms）
-[ 370.18s]     I (368175) net: 邮箱计数: 收下 138 / 协议拒 0 / 序号丢 0 / 进HOLD 3 / 进RELAX 1 / 急停 0 / tick 36679
-[ 370.27s]     /status | ip=192.168.4.1 clients=1 up=1
-[ 370.27s]     /status | mode=CHAIN running=0 estopped=0 stop_reason=命令超时
-[ 370.27s]     /status | link=RELAX age_ms=5200 hb_ms=250 long_ms=2000
-[ 370.27s]     /status | q: accepted=138 rejected=0 dropped_seq=0 hold=3 relax=1 estop=0 ticks=36882
-[ 370.27s]     /status | motion: ticks=2860 overruns=0 period_us=10000 work_us=25 i2c_writes=819
-[ 370.27s] （注意：这条 /status 能读回来说明电脑此刻仍连在 AP 上）
-[ 370.27s] 
-[ 370.27s] === ⑥ 收尾：estop 让舵机回松力（安全态）===
-[ 370.27s] SERIAL >>> estop
-[ 372.29s]     I (370277) p0: > estop
-[ 372.29s]     I (370278) app_action: 动作已取消（姿态动画状态已复位，行走命令已归零）
-[ 372.29s]     E (370279) motion: *** 急停 *** 控制台命令
-[ 372.29s]     W (370314) p2: 急停完成：动作已取消，12 路无脉冲（舵机松力），控制任务已停
-[ 372.79s] SERIAL >>> readback
-[ 374.80s]     I (372789) p0: > readback
-[ 374.80s]     I (372789) p2: 回读 12 路寄存器：
-[ 374.80s]     I (372790) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372794) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372802) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372810) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372817) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372825) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372833) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372841) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372848) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372856) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372864) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372871) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=4096  (无脉冲/松力)
-[ 374.80s]     I (372878) p2: 读回完成，失败 0 路
-[ 374.80s] 
-[ 374.80s] === ⑦ 配置写入通道（标定键 / sc / 参数表单）===
-[ 374.80s] SERIAL >>> cfg get c1_thigh
-[ 376.31s]     I (374798) p0: > cfg get c1_thigh
-[ 376.31s]     I (374799) cfg:   c1_thigh         = 84.0000
-[ 376.31s] 起始 c1_thigh = 84.0
-[ 378.32s] SERIAL >>> cfg get c1_thigh
-[ 379.84s]     W (376374) net: 客户端回来了：重新启动控制任务
-[ 379.84s]     I (376374) motion: 控制任务启动: 周期 10 ms (100 Hz), 速率上限 120 °/s, 超时 0 ms（已关闭）
-[ 379.84s]     W (376623) net: 心跳超时（>250 ms）：输入归零，保持姿态
-[ 379.84s]     W (376923) net: 心跳超时（>250 ms）：输入归零，保持姿态
-[ 379.84s]     W (377213) net: 心跳超时（>250 ms）：输入归零，保持姿态
-[ 379.84s]     W (377504) net: 心跳超时（>250 ms）：输入归零，保持姿态
-[ 379.84s]     I (378318) p0: > cfg get c1_thigh
-[ 379.84s]     I (378319) cfg:   c1_thigh         = 84.0000
-[ 379.84s]     E (379254) net: 断连超过 2000 ms：放松舵机（安全态）
-[ 379.84s]     W (379262) motion: 控制任务结束，原因: 命令超时
-[ 379.84s] 选腿1 + hi×3 之后 c1_thigh = 84.0
-[ 379.84s] ⇒ 标定键生效（+3）= False
-[ 380.80s] SERIAL >>> cfg get c1_thigh
-[ 382.32s]     I (379874) cfg:   c1_thigh         = 84.0000
-[ 382.32s]     I (379876) app_action: 动作层就绪：中位角来自 app_config，pose_blend_ms=900 ms, sit_height=86, in_pit=0 in_rol=0 in_y=18
-[ 382.32s]     I (379882) cfg: （尚未保存，敲 `cfg save` 写入 NVS）
-[ 382.32s]     I (379889) net: 配置表单：处理 1 项（未保存，需 `sc`）
-[ 382.32s]     I (380803) p0: > cfg get c1_thigh
-[ 382.32s]     I (380804) cfg:   c1_thigh         = 84.0000
-[ 382.32s] 表单路由设为 84 之后 c1_thigh = 84.0
-[ 382.32s] ⇒ 参数表单生效且复原 = True
-[ 383.12s] SERIAL >>> cfg info
-[ 384.63s]     W (382353) net: 客户端回来了：重新启动控制任务
-[ 384.63s]     I (382354) motion: 控制任务启动: 周期 10 ms (100 Hz), 速率上限 120 °/s, 超时 0 ms（已关闭）
-[ 384.63s]     W (382603) net: 心跳超时（>250 ms）：输入归零，保持姿态
-[ 384.63s]     I (383117) p0: > cfg info
-[ 384.63s]     I (383118) cfg: ---- 配置状态 ----
-[ 384.63s]     I (383118) cfg:   结构版本      : 2 (APP_CFG_VERSION=2)
-[ 384.63s]     I (383120) cfg:   CRC32         : 0x00000000
-[ 384.63s]     I (383125) cfg:   sizeof(结构)  : 448 字节
-[ 384.63s]     I (383130) cfg:   上次加载结果  : -1 (no saved config (using defaults))
-[ 384.63s]     I (383138) cfg:   NVS 条目      : 已用 166 / 共 756, 空闲 590
-[ 384.63s]     I (383145) cfg:   提示：改完记得敲 `cfg save`，否则掉电就丢
-[ 384.63s]     E (384353) net: 断连超过 2000 ms：放松舵机（安全态）
-[ 384.63s]     W (384362) motion: 控制任务结束，原因: 命令超时
-[ 384.63s] 
-[ 384.63s] === ⑦b 序号重放保护 ===
-[ 384.74s] 重放前：accepted=143 dropped_seq=0
-[ 385.90s] 重放后：accepted=145 dropped_seq=1
-[ 385.90s] ⇒ 重放被丢、新序号被收（期望 accepted +2 / dropped_seq +1）= True
-[ 385.90s] SERIAL >>> net counters
-[ 387.91s]     W (384774) net: 客户端回来了：重新启动控制任务
-[ 387.91s]     I (384774) motion: 控制任务启动: 周期 10 ms (100 Hz), 速率上限 120 °/s, 超时 0 ms（已关闭）
-[ 387.91s]     W (385023) net: 心跳超时（>250 ms）：输入归零，保持姿态
-[ 387.91s]     W (385514) net: 心跳超时（>250 ms）：输入归零，保持姿态
-[ 387.91s]     I (385901) p0: > net counters
-[ 387.91s]     I (385902) net: 链路状态: HOLD（距上一帧 643 ms）
-[ 387.91s]     I (385903) net: 邮箱计数: 收下 145 / 协议拒 0 / 序号丢 1 / 进HOLD 10 / 进RELAX 3 / 急停 0 / tick 38451
-[ 387.91s]     E (387264) net: 断连超过 2000 ms：放松舵机（安全态）
-[ 387.91s]     W (387272) motion: 控制任务结束，原因: 命令超时
-[ 387.91s] 
-[ 387.91s] ================= 结论 =================
-[ 387.91s] ① 起始 12 路全松力              : True
-[ 387.91s] ② 控制任务起来后舵机有出力      : True  <== 假通过闸门
-[ 387.91s] ③ 静止时两次 readback 完全相同  : True  （差别 无）
-[ 387.91s] ④ 推杆时两次 readback 不同      : True  （差别 [1, 4, 5, 7, 8, 10]）
-[ 387.91s] ④ 推杆 vs 静止 不同             : True
-[ 387.91s] ⑥ 收尾回松力                    : True
-[ 387.91s] ⑦ 标定键 ±1 生效（配置通道）     : False
-[ 387.91s] ⑦ 参数表单 `/?name=value` 生效   : True
-[ 387.91s] ⑦b 序号重放被丢 / 新序号被收     : True
-[ 387.91s] 
-[ 387.91s] 判定『网页摇杆驱动了舵机』= ②舵机有出力 且 ③静止时两次相同 且 ④推杆时两次不同
-[ 387.91s] === 摇杆链路 PASS ===
-[ 387.91s] === 配置通道 + 重放保护 FAIL / 需人工看日志 ===
-[ 387.91s] 日志已写入 C:\Users\boyi\Desktop\MechanicalDogUpgrade\diagnostics\p5_link_log.txt
+[   1.52s] 等待 AP 可达（最多 600 秒）—— 请现在把电脑连到 WiFi RobotDog
+[  29.04s] AP 已可达 ✔
+[  29.04s]     /status | ip=192.168.4.1 clients=1 up=1
+[  29.04s]     /status | mode=POSE running=0 estopped=0 stop_reason=无（还在运行）
+[  29.04s]     /status | link=IDLE age_ms=4294967295 hb_ms=250 long_ms=2000
+[  29.04s]     /status | q: accepted=0 rejected=0 dropped_seq=0 hold=0 relax=0 estop=0 ticks=2759
+[  29.04s]     /status | motion: ticks=0 overruns=0 period_us=0 work_us=0 i2c_writes=0
+[  29.04s] 
+[  29.04s] === ① 基线 readback（期望 12 路全 OFF=4096 松力）===
+[  29.04s] SERIAL >>> readback
+[  31.05s]     I (26912) wifi:new:<1,1>, old:<1,1>, ap:<1,1>, sta:<255,255>, prof:1
+[  31.05s]     I (26914) wifi:station: ac:f2:3c:c5:4e:b7 join, AID=1, bgn, 40U
+[  31.05s]     I (26939) wifi:<ba-add>idx:2 (ifx:1, ac:f2:3c:c5:4e:b7), tid:0, ssn:1, winSize:64
+[  31.05s]     I (27293) esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.4.2
+[  31.05s]     I (29038) p0: > readback
+[  31.05s]     I (29039) p2: 回读 12 路寄存器：
+[  31.05s]     I (29041) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29044) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29052) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29059) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29067) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29074) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29082) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29089) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29097) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29105) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29112) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29120) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=4096  (无脉冲/松力)
+[  31.05s]     I (29127) p2: 读回完成，失败 0 路
+[  31.05s] 解析到 12 路；全部松力 = True
+[  31.05s] 
+[  31.05s] === ② 起控制链与运动任务（摇杆居中、持续发送）===
+[  31.05s] 持续发送线程已启动（~10 Hz，f=0）
+[  31.05s] SERIAL >>> motion mode chain
+[  32.27s]     I (31053) p0: > motion mode chain
+[  32.27s]     I (31054) motion: 控制模式 = CHAIN (控制链/步态)
+[  32.27s]     I (31054) p2: motion mode chain -> ESP_OK
+[  32.27s] SERIAL >>> motion start
+[  34.28s]     I (32266) p0: > motion start
+[  34.28s]     I (32267) p2: motion start -> ESP_OK
+[  34.28s]     I (32267) motion: 控制任务启动: 周期 10 ms (100 Hz), 速率上限 120 °/s, 超时 0 ms（已关闭）
+[  34.28s]     W (34107) net: 心跳超时（>250 ms）：输入归零，保持姿态
+[  34.28s] 等站姿收敛 12 秒（全程持续发送）...
+[  46.28s] 
+[  46.28s] === ③ 静止对照：摇杆居中，连读两次 ===
+[  46.28s] SERIAL >>> readback
+[  48.29s]     I (42268) motion: 统计: ticks=1001 模式=CHAIN 周期 us(avg/max)=9990/11436 抖动max=6128 us 干活 us(avg/max)=216/9560 超期=0 I2C写=64 链帧=155 动作帧=0 已到位=是
+[  48.29s]     W (42487) net: 心跳超时（>250 ms）：输入归零，保持姿态
+[  48.29s]     I (46281) p0: > readback
+[  48.29s]     I (46281) p2: 回读 12 路寄存器：
+[  48.29s]     I (46283) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=333
+[  48.29s]     I (46284) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=402
+[  48.29s]     I (46290) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=424
+[  48.29s]     I (46296) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=311
+[  48.29s]     I (46302) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=434
+[  48.29s]     I (46308) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=446
+[  48.29s]     I (46314) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=320
+[  48.29s]     I (46319) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=199
+[  48.29s]     I (46325) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=181
+[  48.29s]     I (46331) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=347
+[  48.29s]     I (46337) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=169
+[  48.29s]     I (46343) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=143
+[  48.29s]     I (46348) p2: 读回完成，失败 0 路
+[  49.79s] SERIAL >>> readback
+[  51.80s]     I (49793) p0: > readback
+[  51.80s]     I (49794) p2: 回读 12 路寄存器：
+[  51.80s]     I (49795) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=333
+[  51.80s]     I (49797) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=402
+[  51.80s]     I (49803) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=424
+[  51.80s]     I (49809) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=311
+[  51.80s]     I (49815) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=434
+[  51.80s]     I (49820) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=446
+[  51.80s]     I (49826) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=320
+[  51.80s]     I (49833) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=199
+[  51.80s]     I (49842) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=181
+[  51.80s]     I (49844) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=347
+[  51.80s]     I (49850) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=169
+[  51.80s]     I (49855) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=143
+[  51.80s]     I (49860) p2: 读回完成，失败 0 路
+[  51.81s] 居中止静时两次 readback 不同的通道 = 无（期望：空）
+[  51.81s] 
+[  51.81s] === ④ 推杆：持续发送的值改为 f=80，等 3 秒后连读两次 ===
+[  54.81s] SERIAL >>> readback
+[  56.82s]     I (52268) motion: 统计: ticks=2001 模式=CHAIN 周期 us(avg/max)=9995/11436 抖动max=6128 us 干活 us(avg/max)=211/9560 超期=0 I2C写=101 链帧=309 动作帧=0 已到位=是
+[  56.82s]     I (54805) p0: > readback
+[  56.82s]     I (54806) p2: 回读 12 路寄存器：
+[  56.82s]     I (54807) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=333
+[  56.82s]     I (54809) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=378
+[  56.82s]     I (54815) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=423
+[  56.82s]     I (54821) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=311
+[  56.82s]     I (54826) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=445
+[  56.82s]     I (54833) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=499
+[  56.82s]     I (54838) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=320
+[  56.82s]     I (54844) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=190
+[  56.82s]     I (54850) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=139
+[  56.82s]     I (54855) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=347
+[  56.82s]     I (54861) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=195
+[  56.82s]     I (54868) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=144
+[  56.82s]     I (54872) p2: 读回完成，失败 0 路
+[  56.82s] SERIAL >>> readback
+[  58.83s]     I (56820) p0: > readback
+[  58.83s]     I (56821) p2: 回读 12 路寄存器：
+[  58.83s]     I (56822) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=333
+[  58.83s]     I (56824) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=377
+[  58.83s]     I (56829) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=423
+[  58.83s]     I (56835) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=311
+[  58.83s]     I (56841) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=443
+[  58.83s]     I (56847) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=490
+[  58.83s]     I (56853) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=320
+[  58.83s]     I (56860) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=192
+[  58.83s]     I (56865) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=172
+[  58.83s]     I (56870) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=347
+[  58.83s]     I (56876) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=196
+[  58.83s]     I (56882) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=144
+[  58.83s]     I (56887) p2: 读回完成，失败 0 路
+[  58.83s] 推杆时两次 readback 不同的通道 = [1, 4, 5, 7, 8, 10]（期望：非空）
+[  58.83s] 发送线程统计：成功 142 条 / 失败 0 条
+[  58.83s] 推杆 vs 静止 的整体差异通道 = [1, 2, 4, 5, 7, 8, 10, 11]
+[  58.83s] 
+[  58.83s] === ⑤ 断连：停掉发送线程，等 3 秒，读计数 ===
+[  61.89s] SERIAL >>> net counters
+[  63.90s]     W (58977) net: 心跳超时（>250 ms）：输入归零，保持姿态
+[  63.90s]     E (60727) net: 断连超过 2000 ms：放松舵机（安全态）
+[  63.90s]     W (60735) motion: 控制任务结束，原因: 命令超时
+[  63.90s]     I (61891) p0: > net counters
+[  63.90s]     I (61891) net: 链路状态: RELAX（距上一帧 3171 ms）
+[  63.90s]     I (61892) net: 邮箱计数: 收下 142 / 协议拒 0 / 序号丢 0 / 进HOLD 3 / 进RELAX 1 / 急停 0 / tick 6051
+[  64.00s]     /status | ip=192.168.4.1 clients=1 up=1
+[  64.00s]     /status | mode=CHAIN running=0 estopped=0 stop_reason=命令超时
+[  64.00s]     /status | link=RELAX age_ms=5217 hb_ms=250 long_ms=2000
+[  64.00s]     /status | q: accepted=142 rejected=0 dropped_seq=0 hold=3 relax=1 estop=0 ticks=6255
+[  64.00s]     /status | motion: ticks=2846 overruns=0 period_us=10000 work_us=25 i2c_writes=804
+[  64.00s] （注意：这条 /status 能读回来说明电脑此刻仍连在 AP 上）
+[  64.00s] 
+[  64.00s] === ⑥ 收尾：estop 让舵机回松力（安全态）===
+[  64.00s] SERIAL >>> estop
+[  66.01s]     I (64003) p0: > estop
+[  66.01s]     I (64005) app_action: 动作已取消（姿态动画状态已复位，行走命令已归零）
+[  66.01s]     E (64006) motion: *** 急停 *** 控制台命令
+[  66.01s]     W (64041) p2: 急停完成：动作已取消，12 路无脉冲（舵机松力），控制任务已停
+[  66.51s] SERIAL >>> readback
+[  68.52s]     I (66513) p0: > readback
+[  68.52s]     I (66514) p2: 回读 12 路寄存器：
+[  68.52s]     I (66515) p2:   ch0  L-F hip    0x40 ch0  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66519) p2:   ch1  L-F thigh  0x40 ch1  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66527) p2:   ch2  L-F shank  0x40 ch2  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66534) p2:   ch3  L-R hip    0x40 ch3  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66542) p2:   ch4  L-R thigh  0x40 ch4  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66549) p2:   ch5  L-R shank  0x40 ch5  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66557) p2:   ch6  R-F hip    0x41 ch0  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66565) p2:   ch7  R-F thigh  0x41 ch1  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66572) p2:   ch8  R-F shank  0x41 ch2  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66580) p2:   ch9  R-R hip    0x41 ch3  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66588) p2:   ch10 R-R thigh  0x41 ch4  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66595) p2:   ch11 R-R shank  0x41 ch5  ON=0 OFF=4096  (无脉冲/松力)
+[  68.52s]     I (66602) p2: 读回完成，失败 0 路
+[  68.52s] 
+[  68.52s] === ⑦ 配置写入通道（标定键 / sc / 参数表单）===
+[  68.52s] SERIAL >>> cfg get c1_thigh
+[  70.04s]     I (68522) p0: > cfg get c1_thigh
+[  70.04s]     I (68523) cfg:   c1_thigh         = 84.0000
+[  70.04s] 起始 c1_thigh = 84.0
+[  72.02s] SERIAL >>> cfg get c1_thigh
+[  73.53s]     W (70087) net: 客户端回来了：重新启动控制任务
+[  73.53s]     I (70088) motion: 控制任务启动: 周期 10 ms (100 Hz), 速率上限 120 °/s, 超时 0 ms（已关闭）
+[  73.53s]     I (70089) app_action: 动作层就绪：中位角来自 app_config，pose_blend_ms=900 ms, sit_height=86, in_pit=0 in_rol=0 in_y=18
+[  73.53s]     I (70106) net: 标定：选中腿 = 1
+[  73.53s]     W (70337) net: 心跳超时（>250 ms）：输入归零，保持姿态
+[  73.53s]     I (70389) app_action: 动作层就绪：中位角来自 app_config，pose_blend_ms=900 ms, sit_height=86, in_pit=0 in_rol=0 in_y=18
+[  73.53s]     I (70394) net: 标定微调 hi：腿1 大腿 = 85.0
+[  73.53s]     W (70637) net: 心跳超时（>250 ms）：输入归零，保持姿态
+[  73.53s]     I (70670) app_action: 动作层就绪：中位角来自 app_config，pose_blend_ms=900 ms, sit_height=86, in_pit=0 in_rol=0 in_y=18
+[  73.53s]     I (70674) net: 标定微调 hi：腿1 大腿 = 86.0
+[  73.53s]     W (70917) net: 心跳超时（>250 ms）：输入归零，保持姿态
+[  73.53s]     I (70958) app_action: 动作层就绪：中位角来自 app_config，pose_blend_ms=900 ms, sit_height=86, in_pit=0 in_rol=0 in_y=18
+[  73.53s]     I (70961) net: 标定微调 hi：腿1 大腿 = 87.0
+[  73.53s]     W (71207) net: 心跳超时（>250 ms）：输入归零，保持姿态
+[  73.53s]     I (72017) p0: > cfg get c1_thigh
+[  73.53s]     I (72018) cfg:   c1_thigh         = 87.0000
+[  73.53s]     E (72957) net: 断连超过 2000 ms：放松舵机（安全态）
+[  73.53s]     W (72966) motion: 控制任务结束，原因: 命令超时
+[  73.54s] 选腿1 + hi×3 之后 c1_thigh = 87.0
+[  73.54s] ⇒ 标定键生效（+3）= True
+[  74.52s] SERIAL >>> cfg get c1_thigh
+[  76.04s]     I (73550) cfg:   c1_thigh         = 84.0000
+[  76.04s]     I (73551) app_action: 动作层就绪：中位角来自 app_config，pose_blend_ms=900 ms, sit_height=86, in_pit=0 in_rol=0 in_y=18
+[  76.04s]     I (73557) cfg: （尚未保存，敲 `cfg save` 写入 NVS）
+[  76.04s]     I (73563) net: 配置表单：处理 1 项（未保存，需 `sc`）
+[  76.04s]     I (74523) p0: > cfg get c1_thigh
+[  76.04s]     I (74524) cfg:   c1_thigh         = 84.0000
+[  76.04s] 表单路由设为 84 之后 c1_thigh = 84.0
+[  76.04s] ⇒ 参数表单生效且复原 = True
+[  76.77s] SERIAL >>> cfg info
+[  78.29s]     W (76198) net: 客户端回来了：重新启动控制任务
+[  78.29s]     I (76199) motion: 控制任务启动: 周期 10 ms (100 Hz), 速率上限 120 °/s, 超时 0 ms（已关闭）
+[  78.29s]     I (76206) net: sc：配置已写入 NVS（rc=0）
+[  78.29s]     W (76447) net: 心跳超时（>250 ms）：输入归零，保持姿态
+[  78.29s]     I (76765) p0: > cfg info
+[  78.29s]     I (76765) cfg: ---- 配置状态 ----
+[  78.29s]     I (76765) cfg:   结构版本      : 2 (APP_CFG_VERSION=2)
+[  78.29s]     I (76768) cfg:   CRC32         : 0x7FE297E7
+[  78.29s]     I (76772) cfg:   sizeof(结构)  : 448 字节
+[  78.29s]     I (76777) cfg:   上次加载结果  : -1 (no saved config (using defaults))
+[  78.29s]     I (76785) cfg:   NVS 条目      : 已用 182 / 共 756, 空闲 574
+[  78.29s]     I (76792) cfg:   提示：改完记得敲 `cfg save`，否则掉电就丢
+[  78.29s]     E (78197) net: 断连超过 2000 ms：放松舵机（安全态）
+[  78.29s]     W (78207) motion: 控制任务结束，原因: 命令超时
+[  78.29s] 
+[  78.29s] === ⑦b 序号重放保护 ===
+[  78.39s] 重放前：accepted=147 dropped_seq=0
+[  80.08s] 重放后：accepted=149 dropped_seq=1
+[  80.08s] ⇒ 重放被丢、新序号被收（期望 accepted +2 / dropped_seq +1）= True
+[  80.08s] SERIAL >>> net counters
+[  82.10s]     W (78407) net: 客户端回来了：重新启动控制任务
+[  82.10s]     I (78408) motion: 控制任务启动: 周期 10 ms (100 Hz), 速率上限 120 °/s, 超时 0 ms（已关闭）
+[  82.10s]     W (78657) net: 心跳超时（>250 ms）：输入归零，保持姿态
+[  82.10s]     W (79437) net: 心跳超时（>250 ms）：输入归零，保持姿态
+[  82.10s]     I (80084) p0: > net counters
+[  82.10s]     I (80086) net: 链路状态: HOLD（距上一帧 905 ms）
+[  82.10s]     I (80086) net: 邮箱计数: 收下 149 / 协议拒 0 / 序号丢 1 / 进HOLD 10 / 进RELAX 3 / 急停 0 / tick 7870
+[  82.10s]     E (81187) net: 断连超过 2000 ms：放松舵机（安全态）
+[  82.10s]     W (81196) motion: 控制任务结束，原因: 命令超时
+[  82.10s] 
+[  82.10s] ================= 结论 =================
+[  82.10s] ① 起始 12 路全松力              : True
+[  82.10s] ② 控制任务起来后舵机有出力      : True  <== 假通过闸门
+[  82.10s] ③ 静止时两次 readback 完全相同  : True  （差别 无）
+[  82.10s] ④ 推杆时两次 readback 不同      : True  （差别 [1, 4, 5, 7, 8, 10]）
+[  82.10s] ④ 推杆 vs 静止 不同             : True
+[  82.10s] ⑥ 收尾回松力                    : True
+[  82.10s] ⑦ 标定键 ±1 生效（配置通道）     : True
+[  82.10s] ⑦ 参数表单 `/?name=value` 生效   : True
+[  82.10s] ⑦b 序号重放被丢 / 新序号被收     : True
+[  82.10s] 
+[  82.10s] 判定『网页摇杆驱动了舵机』= ②舵机有出力 且 ③静止时两次相同 且 ④推杆时两次不同
+[  82.10s] === 摇杆链路 PASS ===
+[  82.10s] === 配置通道 + 重放保护 PASS ===
+[  82.10s] 日志已写入 C:\Users\boyi\Desktop\MechanicalDogUpgrade\diagnostics\p5_link_log.txt
