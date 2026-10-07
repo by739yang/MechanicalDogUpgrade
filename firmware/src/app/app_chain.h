@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file    app_chain.h
  * @brief   把 `control_chain`（原版 `mainloop()` 的一帧）接到固件上的应用层封装
  *
@@ -86,6 +86,21 @@ esp_err_t app_chain_init(void);
 
 /** @brief 重新从当前配置读取（`cfg set` 改完之后调用，让改动生效并复位姿态状态） */
 esp_err_t app_chain_reload_cfg(void);
+
+/**
+ * @brief 重新从当前配置派生链的 cfg，但**不复位姿态与命令状态**。
+ *
+ * 用在"改了中位角或标量参数、希望**下一帧就生效**、但不要重新站"的场合：
+ * 标定键（网页 `hi/hd/si/sd/ip/id` ±1°）与 `cfg set`。
+ *
+ * 依据：`control_chain.c` 每帧都执行 `sm.init[i][j] = cfg->init[i][j]`，
+ * 所以**原地改 `s_cfg` 下一帧就生效** —— 与原版"`padog.init_*` 是模块级全局、
+ * `servo_output()` 每帧直接读"的行为一致。
+ *
+ * ⚠️ 与 `app_chain_reload_cfg()` 的**唯一区别**就是"要不要复位状态"。
+ *    标定用错那个的话，每点一下都要重新收敛约 9 秒，标定就没法用了。
+ */
+esp_err_t app_chain_refresh_cfg_keep_state(void);
 
 /** @brief 设置链的调用周期（毫秒）。1..1000。默认 `APP_CHAIN_DEFAULT_PERIOD_MS` */
 esp_err_t app_chain_set_period_ms(uint32_t ms);

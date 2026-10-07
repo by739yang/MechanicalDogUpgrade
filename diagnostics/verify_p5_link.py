@@ -178,6 +178,91 @@ def parse_readback(text):
     return out
 
 
+def parse_cfg_value(text, name):
+    """从 `cfg get <name>` 的回显里抠出数值（格式容忍两种写法）"""
+    for ln in text.splitlines():
+        if name in ln and "=" in ln:
+            m = re.search(r"=\s*([-+]?\d+(?:\.\d+)?)", ln)
+            if m:
+                return float(m.group(1))
+    return None
+
+
+def status_int(text, key):
+    m = re.search(key + r"=(\d+)", text or "")
+    return int(m.group(1)) if m else None
+
+
+# ----------------------------------------------------------------------------
+# ⑦ 配置写入通道 + 序号重放保护（C 阶段新增的两块）
+# ----------------------------------------------------------------------------
+
+def phase_config_and_seq(s, results):
+    log("")
+    log("=== ⑦ 配置写入通道（标定键 / sc / 参数表单）===")
+
+    # --- 标定键：选腿 1 → 大腿 +1 三次，看配置值是否跟着涨 ---
+    out0 = cmd(s, "cfg get c1_thigh", 1.5)
+    v0 = parse_cfg_value(out0, "c1_thigh")
+    log("起始 c1_thigh = %s" % v0)
+
+    for k in ("key=l1", "key=hi", "key=hi", "key=hi"):
+        http_get("/" + k, timeout=1.5)
+        time.sleep(0.2)
+    time.sleep(0.8)
+
+    out1 = cmd(s, "cfg get c1_thigh", 1.5)
+    v1 = parse_cfg_value(out1, "c1_thigh")
+    log("选腿1 + hi×3 之后 c1_thigh = %s" % v1)
+    ok_nudge = (v0 is not None and v1 is not None and abs((v1 - v0) - 3.0) < 1e-6)
+    log("⇒ 标定键生效（+3）= %s" % ok_nudge)
+    results["cal_nudge_ok"] = ok_nudge
+
+    # --- 参数表单路由：`GET /?c1_thigh=NN`（原版 `<form action="/">`）---
+    # ⚠️ 复原要**精确**（用 %g，不取整）：下面会 `sc` 存 NVS，
+    #    若这里悄悄截断成整数，就会把用户的标定值永久改掉零点几度。
+    target_txt = ("%g" % v0) if v0 is not None else "84"
+    http_get("/?c1_thigh=%s" % target_txt, timeout=1.5)
+    time.sleep(0.8)
+    out2 = cmd(s, "cfg get c1_thigh", 1.5)
+    v2 = parse_cfg_value(out2, "c1_thigh")
+    log("表单路由设为 %s 之后 c1_thigh = %s" % (target_txt, v2))
+    ok_form = (v0 is not None and v2 is not None and abs(v2 - v0) < 1e-6)
+    log("⇒ 参数表单生效且复原 = %s" % ok_form)
+    results["config_form_ok"] = ok_form
+
+    # --- sc 写 NVS ---
+    http_get("/key=sc", timeout=1.5)
+    time.sleep(0.5)
+    cmd(s, "cfg info", 1.5)
+    results["sc_sent"] = True
+
+    # --- 序号重放保护 ---
+    log("")
+    log("=== ⑦b 序号重放保护 ===")
+    st0 = http_get("/status", timeout=2.0)
+    a0, d0 = status_int(st0, "accepted"), status_int(st0, "dropped_seq")
+    log("重放前：accepted=%s dropped_seq=%s" % (a0, d0))
+
+    # 同一个 seq 发两次 + 一个更新的 seq：应当 收下2 / 序号丢1
+    http_get("/f=0t=0&seq=777000", timeout=1.5)
+    time.sleep(0.15)
+    http_get("/f=0t=0&seq=777000", timeout=1.5)   # 重放 → 应被丢弃
+    time.sleep(0.15)
+    http_get("/f=0t=0&seq=777001", timeout=1.5)   # 更新 → 应收下
+    time.sleep(0.5)
+
+    st1 = http_get("/status", timeout=2.0)
+    a1, d1 = status_int(st1, "accepted"), status_int(st1, "dropped_seq")
+    log("重放后：accepted=%s dropped_seq=%s" % (a1, d1))
+    ok_replay = (a0 is not None and d0 is not None and a1 is not None and d1 is not None
+                 and (a1 - a0) == 2 and (d1 - d0) == 1)
+    log("⇒ 重放被丢、新序号被收（期望 accepted +2 / dropped_seq +1）= %s" % ok_replay)
+    results["replay_protection_ok"] = ok_replay
+
+    cmd(s, "net counters", 2.0)
+
+
 def diff_channels(a, b):
     """返回不同的通道号列表"""
     keys = sorted(set(a) | set(b))
@@ -277,6 +362,9 @@ def main():
     rb_end = parse_readback(cmd(s, "readback", 2.0))
     results["final_all_relaxed"] = (rb_end and all(v == (0, 4096) for v in rb_end.values()))
 
+    # ---- 7. C 阶段新增的两块：配置写入通道 + 序号重放保护 ----
+    phase_config_and_seq(s, results)
+
     # ---- 汇总 ----
     log("")
     log("================= 结论 =================")
@@ -289,17 +377,23 @@ def main():
         % (results.get("moving_differs"), d_moving or "无"))
     log("④ 推杆 vs 静止 不同             : %s" % results.get("pushed_vs_static_differs"))
     log("⑥ 收尾回松力                    : %s" % results.get("final_all_relaxed"))
+    log("⑦ 标定键 ±1 生效（配置通道）     : %s" % results.get("cal_nudge_ok"))
+    log("⑦ 参数表单 `/?name=value` 生效   : %s" % results.get("config_form_ok"))
+    log("⑦b 序号重放被丢 / 新序号被收     : %s" % results.get("replay_protection_ok"))
     log("")
     log("判定『网页摇杆驱动了舵机』= ②舵机有出力 且 ③静止时两次相同 且 ④推杆时两次不同")
     verdict = (results.get("servos_energized") and results.get("static_identical")
                and results.get("moving_differs"))
-    log("=== %s ===" % ("PASS" if verdict else "FAIL / 需人工看日志"))
+    log("=== 摇杆链路 %s ===" % ("PASS" if verdict else "FAIL / 需人工看日志"))
+    verdict_c = (results.get("cal_nudge_ok") and results.get("config_form_ok")
+                 and results.get("replay_protection_ok"))
+    log("=== 配置通道 + 重放保护 %s ===" % ("PASS" if verdict_c else "FAIL / 需人工看日志"))
 
     s.close()
     flush_log()
     log("日志已写入 %s" % LOGPATH)
     flush_log()
-    return 0 if verdict else 1
+    return 0 if (verdict and verdict_c) else 1
 
 
 T0 = time.time()

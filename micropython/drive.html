@@ -32,6 +32,26 @@ h2{font-size:.95em;margin:0 0 8px;color:#94a3b8;font-weight:500}
 .foot{text-align:center;font-size:11px;color:#64748b;margin-top:12px}
 </style>
 <script>
+/* MechanicalDogUpgrade: same seq shim as control.html -- every command request
+   gets a strictly increasing seq so the firmware can drop replays and reordered
+   frames.  Frames without a seq (an old cached page) are still accepted. */
+(function () {
+  var last = 0;
+  function nextSeq() {
+    var t = Date.now();
+    if (t <= last) { t = last + 1; }
+    last = t;
+    return t % 4294967296;
+  }
+  var orig = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    var a = Array.prototype.slice.call(arguments);
+    if (typeof url === 'string' && url.indexOf('seq=') < 0) {
+      a[1] = url + (url.indexOf('=') >= 0 ? '&' : '?') + 'seq=' + nextSeq();
+    }
+    return orig.apply(this, a);
+  };
+})();
 var JoyStick=function(c,p){p=p||{};var t=p.title||c,w=p.width||0,h=p.height||0,
 ifc=p.internalFillColor||"#22d3ee",isc=p.internalStrokeColor||"#0891b2",
 elw=p.externalLineWidth||2,esc=p.externalStrokeColor||"#64748b",arc=p.autoReturnToCenter!==false,

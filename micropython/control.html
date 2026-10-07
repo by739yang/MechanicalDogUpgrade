@@ -31,6 +31,33 @@
 .dimSlide { transform: scaleX(2) rotate(0deg); width: 200px;position: relative}
 		</style>
 <script language="javascript">
+/* ---------------------------------------------------------------------------
+   MechanicalDogUpgrade: give every command request a monotonic seq.
+   The original page sent none, so the firmware could not tell a replayed or
+   reordered request from a fresh one (the migration table lists that as a real
+   gap).  seq is milliseconds since epoch, forced strictly increasing within the
+   page, so reloading the page cannot make it go backwards -- a smaller seq
+   would be rejected as stale.  Old cached copies of this page keep working:
+   a frame with no seq is simply accepted without the ordering check.
+   Only this shim is added; the rest of the page is unchanged.
+   --------------------------------------------------------------------------- */
+(function () {
+  var last = 0;
+  function nextSeq() {
+    var t = Date.now();
+    if (t <= last) { t = last + 1; }
+    last = t;
+    return t % 4294967296;
+  }
+  var orig = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    var a = Array.prototype.slice.call(arguments);
+    if (typeof url === 'string' && url.indexOf('seq=') < 0) {
+      a[1] = url + (url.indexOf('=') >= 0 ? '&' : '?') + 'seq=' + nextSeq();
+    }
+    return orig.apply(this, a);
+  };
+})();
 var JoyStick = (function(container, parameters)
 {
 	parameters = parameters || {};

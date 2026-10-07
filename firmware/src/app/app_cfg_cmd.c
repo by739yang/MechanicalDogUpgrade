@@ -14,6 +14,8 @@
 #include <string.h>
 
 #include "app/app_config_nvs.h"
+#include "app/app_action.h"
+#include "app/app_chain.h"
 #include "esp_log.h"
 
 static const char *TAG = "cfg";
@@ -297,7 +299,45 @@ static void cmd_set(const char *name, const char *value)
                  name, changed, msg);
     }
     print_field(f);
+    /* 让改动**下一帧就生效**（原版里这些量是模块级全局、每帧直接读）*/
+    (void)app_cfg_cmd_apply_live();
     ESP_LOGI(TAG, "（尚未保存，敲 `cfg save` 写入 NVS）");
+}
+
+/**
+ * @brief 把校验过的配置推到"每帧直接读配置"的那两个消费者（**保状态**）。
+ *
+ * ⚠️ 为什么不调 `app_chain_reload_cfg()`：那个会**复位姿态与命令状态**
+ *    （它的注释写着"改了中位角必须重新站"）。标定键的意义是"点一下看舵机动 1°"，
+ *    复位会让每次点击都重新收敛约 9 秒 —— 标定就没法用了。
+ *    原版里这些量是模块级全局、每帧直接读，**不会复位**。
+ *
+ * @note 早期启动阶段（`app_chain` 还没 init）会返回 `INVALID_STATE`，**故意忽略** ——
+ *       `app_cfg_cmd_init()` 在 `app_motion_cmd_init()` 之前跑，那时链还没建。
+ */
+int app_cfg_cmd_apply_live(void)
+{
+    const esp_err_t e1 = app_chain_refresh_cfg_keep_state();
+    if (e1 != ESP_OK && e1 != ESP_ERR_INVALID_STATE) {
+        return (int)e1;
+    }
+    /* 动作层自己也留了一份 12 路中位角（直写站姿 / 挥手用）。它没有"只刷新不复位"
+       的接口，而复位动作状态在校准期间是安全的（那时不会正在做动作）。 */
+    const esp_err_t e2 = app_action_init();
+    if (e2 != ESP_OK && e2 != ESP_ERR_INVALID_STATE) {
+        return (int)e2;
+    }
+    return APP_CFG_OK;
+}
+
+int app_cfg_cmd_save(void)
+{
+    return app_config_save(&s_cfg, app_config_nvs_store());
+}
+
+app_config_t *app_cfg_cmd_get_mut(void)
+{
+    return &s_cfg;
 }
 
 /* ==========================================================================

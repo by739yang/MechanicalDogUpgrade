@@ -123,7 +123,7 @@ _Static_assert(NEVENTS <= PROTO_MAX_EVENTS, "too many events for the 32-bit mask
 static const proto_field_t kFields[] = {
     /*   key      legacy  kind               required           role                uns  off        min   max                    scale          */
     { "rdog",    NULL,   PROTO_KIND_INT,    PROTO_REQ_STRICT,  PROTO_ROLE_MAGIC,   1, OFF(rdog),     PROTO_VERSION, PROTO_VERSION, "magic+version" },
-    { "seq",     NULL,   PROTO_KIND_INT,    PROTO_REQ_STRICT,  PROTO_ROLE_SEQ,     1, OFF(seq),      0, 4294967295LL,          "count" },
+    { "seq",     "seq",  PROTO_KIND_INT,    PROTO_REQ_STRICT,  PROTO_ROLE_SEQ,     1, OFF(seq),      0, 4294967295LL,          "count" },
     { "t",       NULL,   PROTO_KIND_INT,    PROTO_REQ_STRICT,  PROTO_ROLE_NONE,    1, OFF(t_ms),     0, 4294967295LL,          "ms (sender)" },
     { "mode",    "mode", PROTO_KIND_INT,    PROTO_REQ_OPTIONAL,PROTO_ROLE_NONE,    0, OFF(mode),     0, 2,                     "0=pose 1=chain 2=action" },
     { "est",     "est",  PROTO_KIND_INT,    PROTO_REQ_STRICT,  PROTO_ROLE_ESTOP,   0, OFF(est),      0, 1,                     "1=estop" },

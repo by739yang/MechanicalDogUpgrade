@@ -32,6 +32,28 @@ int app_cfg_cmd_init(void);
 /** @brief 取当前生效的配置（只读） */
 const app_config_t *app_cfg_cmd_get(void);
 
+/**
+ * @brief 取**可写**的配置。
+ *
+ * ⚠️ 改完**必须**调 `app_cfg_cmd_apply_live()`，否则改动不会生效 ——
+ * 控制链与动作层各自留了一份配置副本（它们收的是按值传的 `*_cfg_t`）。
+ */
+app_config_t *app_cfg_cmd_get_mut(void);
+
+/**
+ * @brief 把当前配置推到"每帧直接读配置"的消费者（控制链 + 动作层），**不复位状态**。
+ *
+ * 用于标定键（中位角 ±1°）与 `cfg set`。原版里这些量是模块级全局、每帧直接读，
+ * 所以"改一下下一帧就变、而且不会重新站"；`app_chain_reload_cfg()` 会复位状态，
+ * 拿它做标定会导致每点一次都重新收敛约 9 秒。
+ *
+ * @return `APP_CFG_OK`，或底层错误码（早期启动阶段链还没建时返回 OK，属正常）
+ */
+int app_cfg_cmd_apply_live(void);
+
+/** @brief 把当前配置写入 NVS（= 网页的 `sc` / 控制台的 `cfg save`）。 */
+int app_cfg_cmd_save(void);
+
 /** @brief 处理一条 `cfg ...` 命令。`sub` 为子命令，`args` 为其后的参数（可为 NULL）。 */
 void app_cfg_cmd_handle(const char *sub, const char *args);
 

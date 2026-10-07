@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file    app_chain.c
  * @brief   `control_chain` 的应用层封装实现
  *
@@ -198,6 +198,25 @@ esp_err_t app_chain_reload_cfg(void)
 
     ESP_LOGI(TAG, "配置已重载：节拍 %u ms，姿态与命令状态已复位",
              (unsigned)control_chain_sched_period_from_cfg(&s_cfg));
+    return ESP_OK;
+}
+
+esp_err_t app_chain_refresh_cfg_keep_state(void)
+{
+    const app_config_t *c = app_cfg_cmd_get();
+    if (c == NULL || s_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    app_chain_cfg_from_app_config(c, &s_cfg);
+    control_chain_sched_set_period(&s_sched, control_chain_sched_period_from_cfg(&s_cfg));
+    /* ⚠️ 这里**刻意不复位** s_st / s_cmd / s_valid —— 见头文件与实现说明：
+       标定键的意义是"点一下看舵机动 1°"；复位状态会让每次点击都重新收敛约 9 秒，
+       标定就没法用了。原版里 `padog.init_*` 是模块级全局、每帧直接读，也不会复位。 */
+    xSemaphoreGive(s_mutex);
     return ESP_OK;
 }
 

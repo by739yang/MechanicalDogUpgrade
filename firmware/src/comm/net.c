@@ -59,7 +59,7 @@ static volatile bool    s_up;
 
 /* 字段下标（在 `net_start()` 里用**协议层的表**查出来，不自己写死数字）*/
 static int s_f_mode = -1, s_f_spd = -1, s_f_turn = -1, s_f_hgt = -1;
-static int s_f_pit = -1, s_f_rol = -1, s_f_yst = -1;
+static int s_f_pit = -1, s_f_rol = -1, s_f_yst = -1, s_f_seq = -1;
 
 static bool present(const proto_cmd_t *c, int idx)
 {
@@ -171,18 +171,54 @@ static void handle_event(const char *name)
     } else if (strcmp(name, "go") == 0 || strcmp(name, "gc") == 0) {
         ESP_LOGW(TAG, "事件 '%s'（陀螺仪稳定）**不支持**：本机没有 IMU（§8.7 禁止假开关）",
                  name);
-    } else if (strcmp(name, "am1") == 0 || strcmp(name, "am0") == 0 ||
-               strcmp(name, "sc") == 0) {
-        ESP_LOGW(TAG, "事件 '%s' 需要 P6 / 配置通道，本阶段未接线（见迁移表 §0.5(10)）",
-                 name);
+    } else if (strcmp(name, "am1") == 0 || strcmp(name, "am0") == 0) {
+        ESP_LOGW(TAG, "事件 '%s'（机械臂开关）需要 P6，本阶段只保证协议能表达", name);
+    } else if (strcmp(name, "sc") == 0) {
+        /*
+         * ⚠️ 原版 `sc` **只把配置写回文件**，它**没有**调 `servo_init(0)`
+         *    （我一开始在迁移表 §0.5(5) 里记成"会写文件并 servo_init(0)"，是错的，
+         *    后来读 `web_c.py` 的 `sc` 分支核实过）。C 版等价物 = 写 NVS。
+         */
+        const int rc = app_cfg_cmd_save();
+        ESP_LOGI(TAG, "sc：配置已写入 NVS（rc=%d）", rc);
     } else if (name[0] == 'l' && name[1] >= '1' && name[1] <= '4' && name[2] == '\0') {
-        ESP_LOGW(TAG, "标定选腿 '%s' 需要配置写入通道，本阶段未接线；请用串口 "
-                      "`cfg set cal_leg_sel %c`", name, name[1]);
+        app_config_t *c = app_cfg_cmd_get_mut();
+        c->cal_leg_sel = name[1] - '0';
+        (void)app_cfg_cmd_apply_live();
+        ESP_LOGI(TAG, "标定：选中腿 = %d", (int)c->cal_leg_sel);
     } else if (strcmp(name, "hi") == 0 || strcmp(name, "hd") == 0 ||
                strcmp(name, "si") == 0 || strcmp(name, "sd") == 0 ||
                strcmp(name, "ip") == 0 || strcmp(name, "id") == 0) {
-        ESP_LOGW(TAG, "中位角微调 '%s' 需要配置写入通道，本阶段未接线；见迁移表 §0.5(5)",
-                 name);
+        /*
+         * 中位角 ±1°。⚠️ 字母与关节的对应是**反直觉**的（`app_config.h` 里有依据）：
+         *   `p` = 髋（`ip`/`id`）、`h` = **大腿**（`hi`/`hd`）、`s` = 小腿（`si`/`sd`）。
+         * `name[1]` 是 `i` 表示 +1（`hi`/`si`/`ip`），`d` 表示 -1。
+         */
+        const bool up = (name[1] == 'i');
+        app_cfg_joint_t joint = APP_CFG_JOINT_HIP;
+        if (name[0] == 'h') {
+            joint = APP_CFG_JOINT_THIGH;
+        } else if (name[0] == 's') {
+            joint = APP_CFG_JOINT_SHANK;
+        }
+
+        app_config_t *c = app_cfg_cmd_get_mut();
+        const int leg = (int)c->cal_leg_sel;
+        int changed = 0;
+        char msg[96] = {0};
+        const int rc = app_config_nudge_servo_center(c, joint, up ? 1.0f : -1.0f,
+                                                     &changed, msg, sizeof(msg));
+        if (rc == APP_CFG_OK && leg >= 1 && leg <= APP_CFG_LEGS) {
+            (void)app_cfg_cmd_apply_live();
+            ESP_LOGI(TAG, "标定微调 %s：腿%d %s = %.1f%s",
+                     name, leg,
+                     (joint == APP_CFG_JOINT_HIP)   ? "髋" :
+                     (joint == APP_CFG_JOINT_THIGH) ? "大腿" : "小腿",
+                     (double)c->servo_center[leg - 1][joint],
+                     (changed > 0) ? "（已限幅）" : "");
+        } else {
+            ESP_LOGW(TAG, "标定微调 %s 失败（rc=%d, cal_leg_sel=%d）", name, rc, leg);
+        }
     } else {
         /* 协议层保证了名字在白名单里，走到这里说明"表里有、这里没接" —— 必须报出来 */
         ESP_LOGW(TAG, "事件 '%s' 已在协议白名单里，但本阶段没有接线", name);
@@ -191,10 +227,24 @@ static void handle_event(const char *name)
 
 static void apply_events(const proto_cmd_t *c)
 {
-    const size_t n = proto_cmd_ev_count(c);
+    /*
+     * ⚠️ 必须遍历**事件表的全部条目**，再用名字去问"这一帧有没有它"。
+     *
+     * 之前这里写的是 `for (i = 0; i < proto_cmd_ev_count(c); ++i)` —— 而
+     * `proto_cmd_ev_count()` 是 **popcount**（这一帧**置位了几个**事件），
+     * **不是**事件表的长度。于是循环只查了下标 0..(置位数-1)，
+     * 真正被置位的那个事件（比如 `hi` 的位）根本轮不到 ⇒ **所有事件全部静默失效**：
+     * `sc` / `l1`–`l4` / `hi`…`id` / `g0` `g1` / `is` / `btn_stand`… 一个都没执行。
+     * 真机上是通过"点了标定键、`c1_thigh` 一点都不变、而且日志里连一条都没有"发现的。
+     *
+     * 用 `proto_cmd_has_ev(c, name)`（按名字查）而不是按下标查，是因为名字来自
+     * **唯一一份**事件表，不可能和下标的含义对不上。
+     */
+    size_t n = 0;
+    (void)proto_events(&n);
     for (size_t i = 0; i < n; ++i) {
-        const char *nm = proto_event_at((int)i);
-        if (nm != NULL && proto_cmd_has_ev_index(c, (int)i)) {
+        const char *nm = proto_event_at(i);
+        if (nm != NULL && proto_cmd_has_ev(c, nm)) {
             handle_event(nm);
         }
     }
@@ -482,13 +532,7 @@ static feed_result_t feed_bytes(const char *buf, size_t len)
             return FEED_NOT_A_COMMAND;
         }
 
-        /*
-         * ⚠️ `has_seq` 必须按**格式**给：严格格式里 `seq` 是必填键，老页面格式
-         * 根本没有它（字段表标 `PROTO_REQ_STRICT`）。给错了会让老页面从第 2 帧
-         * 起全被丢弃 —— 真机上已经踩过一次（`accepted=1 dropped_seq=629`）。
-         */
-        const bool has_seq = (fmt == PROTO_FMT_STRICT);
-        if (has_seq) {
+        if (fmt == PROTO_FMT_STRICT) {
             rc = proto_decode(&s_dec, buf, len, now_ms, &cmd, &err);
         } else {
             rc = proto_decode_legacy(&s_dec, buf, len, now_ms, &cmd, &err);
@@ -502,6 +546,15 @@ static feed_result_t feed_bytes(const char *buf, size_t len)
             return FEED_REJECTED;
         }
 
+        /*
+         * `has_seq` 以"**这一帧有没有真的带 seq**"为准（`present` 位），不按格式猜：
+         * 严格格式必带；老页面**现在也带**了（页面里加了自增号，见下方说明），
+         * 但**老的缓存页面**可能不带 —— 那时就不做序号判定，照收。
+         *
+         * ⚠️ 一开始这里写的是 `fmt == PROTO_FMT_STRICT`，于是老页面从第 2 帧起
+         *    全被丢弃（`accepted=1 dropped_seq=629`，真机上抓到的）。
+         */
+        const bool has_seq = present(&cmd, s_f_seq);
         const bool ok = cmd_queue_post(&s_q, &cmd, has_seq, now_ms);
         xSemaphoreGive(s_lock);
         return ok ? FEED_OK : FEED_REJECTED;
@@ -509,10 +562,90 @@ static feed_result_t feed_bytes(const char *buf, size_t len)
     return FEED_REJECTED;
 }
 
+/** 就地做 `%XX` 百分号解码（WiFi 名称/密码里可能有空格等）*/
+static void percent_decode(char *s)
+{
+    char *w = s;
+    for (char *r = s; *r != '\0'; ++r) {
+        if (*r == '%' && r[1] != '\0' && r[2] != '\0') {
+            const int hi = (r[1] >= '0' && r[1] <= '9') ? r[1] - '0'
+                       : (r[1] >= 'a' && r[1] <= 'f') ? r[1] - 'a' + 10
+                       : (r[1] >= 'A' && r[1] <= 'F') ? r[1] - 'A' + 10 : -1;
+            const int lo = (r[2] >= '0' && r[2] <= '9') ? r[2] - '0'
+                       : (r[2] >= 'a' && r[2] <= 'f') ? r[2] - 'a' + 10
+                       : (r[2] >= 'A' && r[2] <= 'F') ? r[2] - 'A' + 10 : -1;
+            if (hi >= 0 && lo >= 0) {
+                *w++ = (char)((hi << 4) | lo);
+                r += 2;
+                continue;
+            }
+        }
+        *w++ = (*r == '+') ? ' ' : *r;   /* 表单里 '+' 就是空格 */
+    }
+    *w = '\0';
+}
+
+/**
+ * @brief 处理标定页的参数表单：`GET /?speed=..&l1=..&Kp_H=..`
+ *
+ * 原版 `<form action="/" method="get">` 提交的就是这一串。C 版把它逐项转成
+ * `cfg set <name> <value>` —— **复用控制台那条唯一的字段表 + 唯一一套限幅**
+ * （P-22/P-27：范围不在这里再写一份）。
+ *
+ * ⚠️ 这也是为什么它走**独立路由**而不是命令帧：控制帧只认协议白名单里的键，
+ *    而这些是**配置名**。两条路各管各的，都不越界。
+ */
+static esp_err_t handle_config_form(httpd_req_t *req, const char *uri)
+{
+    const char *q = strchr(uri, '?');
+    if (q == NULL) {
+        return send_204(req);
+    }
+    ++q;
+
+    char buf[384];
+    size_t n = strlen(q);
+    if (n >= sizeof(buf)) {
+        n = sizeof(buf) - 1;
+    }
+    memcpy(buf, q, n);
+    buf[n] = '\0';
+
+    int applied = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, "&", &save); tok != NULL;
+         tok = strtok_r(NULL, "&", &save)) {
+        char *eq = strchr(tok, '=');
+        if (eq == NULL || eq == tok) {
+            continue;
+        }
+        *eq = '\0';
+        percent_decode(tok);
+        percent_decode(eq + 1);
+
+        char args[160];
+        snprintf(args, sizeof(args), "%s %s", tok, eq + 1);
+        app_cfg_cmd_handle("set", args);   /* 未知名字/非法取值由它自己报错 */
+        ++applied;
+    }
+    ESP_LOGI(TAG, "配置表单：处理 %d 项（未保存，需 `sc`）", applied);
+    return send_204(req);
+}
+
 /** 处理 `GET /<...>`：路径里带 `=` 的是命令，否则是页面请求（对应原版 `_wants_page()`）*/
 static esp_err_t handler_get(httpd_req_t *req)
 {
     const char *uri = req->uri;
+
+    /*
+     * 标定页参数表单（`/?...` 或 `/set?...`）走配置通道，与命令帧分开。
+     * ⚠️ 必须**先**判它：否则 `/?speed=..` 会被当命令帧，而 `speed` 不在协议
+     *    白名单里 ⇒ 整帧被拒，用户看到的又是"点了没反应"。
+     */
+    if (uri[0] == '/' &&
+        (uri[1] == '?' || strncmp(uri, "/set?", 5) == 0)) {
+        return handle_config_form(req, uri);
+    }
 
     if (strstr(uri, "favicon.ico") != NULL) {
         return send_204(req);
@@ -745,8 +878,9 @@ esp_err_t net_start(void)
     s_f_pit  = proto_field_find("pit");
     s_f_rol  = proto_field_find("rol");
     s_f_yst  = proto_field_find("yst");
+    s_f_seq  = proto_field_find("seq");
     if (s_f_mode < 0 || s_f_spd < 0 || s_f_turn < 0 || s_f_hgt < 0 ||
-        s_f_pit < 0 || s_f_rol < 0 || s_f_yst < 0) {
+        s_f_pit < 0 || s_f_rol < 0 || s_f_yst < 0 || s_f_seq < 0) {
         ESP_LOGE(TAG, "协议字段表里缺少本层需要的键 —— proto.c 与 net.c 不同步");
         return ESP_ERR_NOT_FOUND;
     }
