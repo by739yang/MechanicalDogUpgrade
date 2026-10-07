@@ -276,7 +276,7 @@ static void comm_task(void *arg)
     TickType_t last_wake = xTaskGetTickCount();
     const TickType_t period = pdMS_TO_TICKS(1000 / NET_COMM_TASK_HZ);
 
-    uint32_t last_applied_seq = 0;
+    uint32_t last_applied_accepted = 0;
     bool     has_applied = false;
 
     for (;;) {
@@ -286,9 +286,11 @@ static void comm_task(void *arg)
         memset(&cmd, 0, sizeof(cmd));
         bool changed = false;
         cmd_queue_state_t st;
+        uint32_t accepted_now = 0;
 
         if (xSemaphoreTake(s_lock, portMAX_DELAY) == pdTRUE) {
             st = cmd_queue_tick(&s_q, now_ms, &cmd, &changed);
+            accepted_now = s_q.cnt.accepted;
             xSemaphoreGive(s_lock);
         } else {
             st = CMD_QUEUE_IDLE;
@@ -300,9 +302,16 @@ static void comm_task(void *arg)
                 motion_estop("网络急停");
                 break;
             }
-            /* 只在**换了新命令**时应用，避免 100 Hz 重复下发同一条 */
-            if (!has_applied || cmd.seq != last_applied_seq) {
-                last_applied_seq = cmd.seq;
+            /*
+             * 只在**换了新命令**时应用，避免 100 Hz 重复下发同一条。
+             *
+             * ⚠️ 判据必须用"邮箱收下的条数"，**不能**用 `cmd.seq`：
+             * 老页面格式根本没有 `seq`（恒为 0），用 seq 判会导致
+             * **收下之后永远不再应用**，摇杆完全没反应 ——
+             * 真机上就是这个现象（报文收下了，狗不动）。
+             */
+            if (!has_applied || accepted_now != last_applied_accepted) {
+                last_applied_accepted = accepted_now;
                 has_applied = true;
                 motion_keepalive();       /* "客户端活着"的唯一证据，别在别处调 */
                 apply_fresh(&cmd, now_ms);
@@ -406,13 +415,20 @@ static esp_err_t send_status(httpd_req_t *req)
     return httpd_resp_send(req, buf, (ssize_t)n);
 }
 
+/** `feed_bytes()` 的三种结果 */
+typedef enum {
+    FEED_OK = 0,          /**< 解析成功并入队 */
+    FEED_REJECTED,        /**< 看着像命令帧，但被协议层拒了（已计数）*/
+    FEED_NOT_A_COMMAND,   /**< 一个已知键都没有 ⇒ 这不是命令帧（浏览器杂请求）*/
+} feed_result_t;
+
 /**
- * @brief 把一段字节交给协议层；解析成功就入队。返回是否被接受。
+ * @brief 把一段字节交给协议层；解析成功就入队。
  *
  * ⚠️ 顺序很重要：**先 peek 急停**，再做完整校验。理由是急停必须在"整帧因别的
  * 字段越界而被拒"时也能生效（§0.5(7)）。peek 只会往安全侧失败（假 1 → 停）。
  */
-static bool feed_bytes(const char *buf, size_t len)
+static feed_result_t feed_bytes(const char *buf, size_t len)
 {
     const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     proto_cmd_t cmd;
@@ -428,8 +444,24 @@ static bool feed_bytes(const char *buf, size_t len)
             cmd_queue_latch_estop(&s_q, true);
         }
 
+        /*
+         * 先认格式。**一个已知键都没有**的（`/apple-touch-icon.png` 之类浏览器
+         * 自己发的请求）不是命令帧 —— 直接当"不是命令"处理，**不要**计进
+         * `rejected`，否则那个计数会被杂请求污染，真出问题时看不出来。
+         */
         const proto_fmt_t fmt = proto_sniff_format(buf, len);
-        if (fmt == PROTO_FMT_STRICT) {
+        if (fmt == PROTO_FMT_UNKNOWN) {
+            xSemaphoreGive(s_lock);
+            return FEED_NOT_A_COMMAND;
+        }
+
+        /*
+         * ⚠️ `has_seq` 必须按**格式**给：严格格式里 `seq` 是必填键，老页面格式
+         * 根本没有它（字段表标 `PROTO_REQ_STRICT`）。给错了会让老页面从第 2 帧
+         * 起全被丢弃 —— 真机上已经踩过一次（`accepted=1 dropped_seq=629`）。
+         */
+        const bool has_seq = (fmt == PROTO_FMT_STRICT);
+        if (has_seq) {
             rc = proto_decode(&s_dec, buf, len, now_ms, &cmd, &err);
         } else {
             rc = proto_decode_legacy(&s_dec, buf, len, now_ms, &cmd, &err);
@@ -440,14 +472,14 @@ static bool feed_bytes(const char *buf, size_t len)
             xSemaphoreGive(s_lock);
             ESP_LOGW(TAG, "命令被拒: %s（字段 %d, 键 '%s'）",
                      proto_err_name(err.code), err.field, err.key);
-            return false;
+            return FEED_REJECTED;
         }
 
-        const bool ok = cmd_queue_post(&s_q, &cmd, now_ms);
+        const bool ok = cmd_queue_post(&s_q, &cmd, has_seq, now_ms);
         xSemaphoreGive(s_lock);
-        return ok;
+        return ok ? FEED_OK : FEED_REJECTED;
     }
-    return false;
+    return FEED_REJECTED;
 }
 
 /** 处理 `GET /<...>`：路径里带 `=` 的是命令，否则是页面请求（对应原版 `_wants_page()`）*/
@@ -488,8 +520,21 @@ static esp_err_t handler_get(httpd_req_t *req)
         return send_page(req, kPageDrive, kPageDrive_LEN);
     }
 
-    (void)feed_bytes(body, strlen(body));
-    return send_204(req);
+    /*
+     * 看这个 path 到底是不是一条命令。
+     * `FEED_NOT_A_COMMAND` 是浏览器自己要的那些东西（图表、探测请求），
+     * 回 404 并且**不计进 rejected** —— 那个计数要留给真正的坏帧。
+     */
+    switch (feed_bytes(body, strlen(body))) {
+    case FEED_OK:
+        return send_204(req);
+    case FEED_NOT_A_COMMAND:
+        return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not a command");
+    case FEED_REJECTED:
+    default:
+        httpd_resp_set_status(req, "400 Bad Request");
+        return httpd_resp_send(req, "rejected\n", 9);
+    }
 }
 
 /** `POST /cmd`：新格式走这里（严格帧带 `seq`/`est`，有重放保护）*/
@@ -511,8 +556,7 @@ static esp_err_t handler_post(httpd_req_t *req)
         got += r;
     }
 
-    const bool ok = feed_bytes(buf, (size_t)got);
-    if (!ok) {
+    if (feed_bytes(buf, (size_t)got) != FEED_OK) {
         httpd_resp_set_status(req, "400 Bad Request");
         return httpd_resp_send(req, "rejected\n", 9);
     }

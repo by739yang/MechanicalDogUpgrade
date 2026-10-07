@@ -41,6 +41,18 @@ static int check(int cond, const char *msg)
  *    （预处理器不区分类成员和参数），报错是 "expected identifier before numeric constant"。 */
 #define MK(s_, e_) (&(proto_cmd_t){ .seq = (s_), .est = (e_) })
 
+/*
+ * 带序号的投递（严格格式）。下面绝大多数用例走这条。
+ *
+ * ⚠️ `post_seq()` 只是把 `has_seq = true` 固定下来；**不带序号的老页面格式**
+ *    必须显式用 `cmd_queue_post(..., false, ...)` —— 见第 8 节，那个 bug 就是
+ *    在这里漏掉的：邮箱和协议层各自都测过，但**没人测"邮箱 + 老格式帧"串起来**。
+ */
+static bool post_seq(cmd_queue_t *q, const proto_cmd_t *c, uint32_t now)
+{
+    return cmd_queue_post(q, c, true, now);
+}
+
 /* ==========================================================================
  * 1. 初始化与阈值
  * ======================================================================== */
@@ -78,7 +90,7 @@ static void test_init(void)
     /* 空指针不许崩 */
     cmd_queue_init(NULL, 1, 2);
     check(cmd_queue_tick(NULL, 0, NULL, NULL) == CMD_QUEUE_IDLE, "tick(NULL) -> IDLE");
-    check(!cmd_queue_post(NULL, NULL, 0), "post(NULL) -> false");
+    check(!post_seq(NULL, NULL, 0), "post(NULL) -> false");
     cmd_queue_count_reject(NULL);
     cmd_queue_latch_estop(NULL, true);
     cmd_queue_clear_estop(NULL);
@@ -118,7 +130,7 @@ static void test_freshness(void)
     check(cmd_queue_age_ms(&q, 0) == UINT32_MAX, "age is UINT32_MAX before any command");
 
     /* t=1000 收到 */
-    check(cmd_queue_post(&q, MK(1, 0), 1000), "first command accepted");
+    check(post_seq(&q, MK(1, 0), 1000), "first command accepted");
     check(cmd_queue_age_ms(&q, 1000) == 0, "age 0 right after receive");
 
     check(cmd_queue_tick(&q, 1000, &out, &changed) == CMD_QUEUE_FRESH, "age 0 -> FRESH");
@@ -142,7 +154,7 @@ static void test_freshness(void)
     check(!changed, "RELAX->RELAX is not a transition");
 
     /* 再来一条命令 -> 立刻回到 FRESH（这就是"重连恢复"） */
-    check(cmd_queue_post(&q, MK(2, 0), 1000 + LG + 500), "command after a gap accepted");
+    check(post_seq(&q, MK(2, 0), 1000 + LG + 500), "command after a gap accepted");
     check(cmd_queue_tick(&q, 1000 + LG + 500, &out, &changed) == CMD_QUEUE_FRESH,
           "a fresh command returns the state to FRESH");
     check(changed, "RELAX->FRESH is a transition");
@@ -160,10 +172,10 @@ static void test_seq(void)
     cmd_queue_t q;
     cmd_queue_init(&q, 250, 2000);
 
-    check(cmd_queue_post(&q, MK(10, 0), 0), "seq 10 accepted on empty mailbox");
-    check(!cmd_queue_post(&q, MK(10, 0), 1), "duplicate seq dropped");
-    check(!cmd_queue_post(&q, MK(9, 0), 2), "older seq dropped");
-    check(cmd_queue_post(&q, MK(11, 0), 3), "newer seq accepted");
+    check(post_seq(&q, MK(10, 0), 0), "seq 10 accepted on empty mailbox");
+    check(!post_seq(&q, MK(10, 0), 1), "duplicate seq dropped");
+    check(!post_seq(&q, MK(9, 0), 2), "older seq dropped");
+    check(post_seq(&q, MK(11, 0), 3), "newer seq accepted");
 
     cmd_queue_counters_t c;
     cmd_queue_get_counters(&q, &c);
@@ -173,16 +185,16 @@ static void test_seq(void)
     /* 回绕：0xFFFFFFFF -> 0 必须接受（用无符号比较写 `a > b` 会在这里判错） */
     cmd_queue_t w;
     cmd_queue_init(&w, 250, 2000);
-    check(cmd_queue_post(&w, MK(0xFFFFFFFEu, 0), 0), "near-max seq accepted");
-    check(cmd_queue_post(&w, MK(0xFFFFFFFFu, 0), 1), "max seq accepted");
-    check(cmd_queue_post(&w, MK(0u, 0), 2), "wrap 0xFFFFFFFF -> 0 accepted");
-    check(cmd_queue_post(&w, MK(1u, 0), 3), "seq 1 after wrap accepted");
-    check(!cmd_queue_post(&w, MK(0xFFFFFFFFu, 0), 4), "post-wrap stale (max) dropped");
+    check(post_seq(&w, MK(0xFFFFFFFEu, 0), 0), "near-max seq accepted");
+    check(post_seq(&w, MK(0xFFFFFFFFu, 0), 1), "max seq accepted");
+    check(post_seq(&w, MK(0u, 0), 2), "wrap 0xFFFFFFFF -> 0 accepted");
+    check(post_seq(&w, MK(1u, 0), 3), "seq 1 after wrap accepted");
+    check(!post_seq(&w, MK(0xFFFFFFFFu, 0), 4), "post-wrap stale (max) dropped");
 
     /* 未收到过命令时，任何 seq 都接受（不能因为"还没基准"就丢第一条） */
     cmd_queue_t f;
     cmd_queue_init(&f, 250, 2000);
-    check(cmd_queue_post(&f, MK(0u, 0), 0), "first command with seq 0 accepted");
+    check(post_seq(&f, MK(0u, 0), 0), "first command with seq 0 accepted");
 }
 
 /* ==========================================================================
@@ -198,11 +210,11 @@ static void test_estop(void)
     bool changed;
     cmd_queue_init(&q, 250, 2000);
 
-    check(cmd_queue_post(&q, MK(1, 0), 0), "normal command accepted");
+    check(post_seq(&q, MK(1, 0), 0), "normal command accepted");
     check(cmd_queue_tick(&q, 0, &out, &changed) == CMD_QUEUE_FRESH, "FRESH before estop");
 
     /* 一条**合法**帧带 est=1 */
-    check(cmd_queue_post(&q, MK(2, 1), 10), "frame with est=1 accepted");
+    check(post_seq(&q, MK(2, 1), 10), "frame with est=1 accepted");
     check(cmd_queue_tick(&q, 10, &out, &changed) == CMD_QUEUE_RELAX,
           "estop forces RELAX even though the frame is fresh");
     check(changed, "FRESH->RELAX transition reported");
@@ -211,7 +223,7 @@ static void test_estop(void)
           "estop output is zeroed (caller cannot act on stale values)");
 
     /* 时间流逝 + 新命令都不许解除急停 */
-    check(cmd_queue_post(&q, MK(3, 0), 5000), "later command accepted");
+    check(post_seq(&q, MK(3, 0), 5000), "later command accepted");
     check(cmd_queue_tick(&q, 5000, &out, &changed) == CMD_QUEUE_RELAX,
           "a later non-estop frame must NOT clear the latch");
     check(out.est == 1, "output still est=1 after a normal frame");
@@ -254,7 +266,7 @@ static void test_disconnect_scenario(void)
 
     /* 1 秒 @ 50 Hz：一直 FRESH */
     for (int i = 0; i < 50; ++i) {
-        check(cmd_queue_post(&q, MK(seq++, 0), now), "polling frame accepted");
+        check(post_seq(&q, MK(seq++, 0), now), "polling frame accepted");
         const cmd_queue_state_t st = cmd_queue_tick(&q, now, &out, &changed);
         check(st == CMD_QUEUE_FRESH, "state is FRESH while polling");
         now += 20;
@@ -280,7 +292,7 @@ static void test_disconnect_scenario(void)
     check(c.ticks == 50 + 300, "ticks counted");
 
     /* 重连：状态回 FRESH，且**不再**重复计 HOLD */
-    check(cmd_queue_post(&q, MK(seq++, 0), now), "reconnect frame accepted");
+    check(post_seq(&q, MK(seq++, 0), now), "reconnect frame accepted");
     check(cmd_queue_tick(&q, now, &out, &changed) == CMD_QUEUE_FRESH, "reconnect -> FRESH");
     cmd_queue_get_counters(&q, &c);
     check(c.hold_entries == 1, "reconnect does not double-count HOLD");
@@ -306,7 +318,7 @@ static void test_time_wrap(void)
     cmd_queue_init(&q, 250, 2000);
 
     const uint32_t near_max = 0xFFFFFFFFu - 100u;   /* 收到命令 */
-    check(cmd_queue_post(&q, MK(1, 0), near_max), "command posted just before wrap");
+    check(post_seq(&q, MK(1, 0), near_max), "command posted just before wrap");
 
     /* 跨过回绕点 150 ms -> 仍然是 FRESH（这正是无符号相减的意义） */
     const uint32_t after = near_max + 150u;         /* 自动回绕 */
@@ -349,6 +361,64 @@ static void test_names(void)
           "unknown state -> \"?\" (must not read out of bounds)");
 }
 
+/* ==========================================================================
+ * 8. 不带序号的老页面格式 —— **真机踩过的那个 bug**
+ * ======================================================================== */
+
+static void test_legacy_frames(void)
+{
+    SECTION("legacy frames (no seq): EVERY frame must be accepted");
+
+    cmd_queue_t q;
+    proto_cmd_t out;
+    bool changed;
+    cmd_queue_init(&q, 250, 2000);
+
+    uint32_t now = 0;
+    /* 老页面按 80 ms 轮询，连发 30 帧 —— 一帧都不许丢 */
+    for (int i = 0; i < 30; ++i) {
+        /* 老格式里没有 `seq`，解出来恒为 0 ⇒ has_seq 必须传 false */
+        check(cmd_queue_post(&q, MK(0u, 0), false, now),
+              "legacy frame must ALWAYS be accepted (there is no seq to compare)");
+        check(cmd_queue_tick(&q, now, &out, &changed) == CMD_QUEUE_FRESH,
+              "legacy frame keeps the link FRESH");
+        now += 80;
+    }
+
+    cmd_queue_counters_t c;
+    cmd_queue_get_counters(&q, &c);
+    check(c.accepted == 30, "all 30 legacy frames accepted");
+    check(c.dropped_seq == 0, "no seq drops for legacy frames (they carry no seq)");
+    check(c.hold_entries == 0 && c.relax_entries == 0,
+          "link never went stale while the page was polling");
+
+    /*
+     * 老帧**不许**把严格格式的序号基准搞乱：
+     * 严格 seq=100 → 老帧 → 严格 seq=101 都要收下；再回放 seq=100 仍要被丢。
+     */
+    cmd_queue_t m;
+    cmd_queue_init(&m, 250, 2000);
+    check(post_seq(&m, MK(100u, 0), 0), "strict seq=100 accepted");
+    check(cmd_queue_post(&m, MK(0u, 0), false, 10), "legacy frame in between accepted");
+    check(post_seq(&m, MK(101u, 0), 20), "strict seq=101 accepted after a legacy frame");
+    check(!post_seq(&m, MK(100u, 0), 30), "strict replay (seq=100) is still dropped");
+    cmd_queue_get_counters(&m, &c);
+    check(c.dropped_seq == 1, "exactly one seq drop counted");
+
+    /*
+     * 规模复现：真机上 `accepted=1 / dropped_seq=629` —— 630 帧只活了 1 帧。
+     * 这里连发 600 帧，一帧都不许丢。
+     */
+    cmd_queue_t b;
+    cmd_queue_init(&b, 250, 2000);
+    for (int i = 0; i < 600; ++i) {
+        (void)cmd_queue_post(&b, MK(0u, 0), false, (uint32_t)(i * 10));
+    }
+    cmd_queue_get_counters(&b, &c);
+    check(c.accepted == 600, "600 legacy frames all accepted");
+    check(c.dropped_seq == 0, "zero drops at scale (the board showed 629)");
+}
+
 int main(void)
 {
     printf("============================================================\n");
@@ -361,6 +431,7 @@ int main(void)
     test_estop();
     test_disconnect_scenario();
     test_time_wrap();
+    test_legacy_frames();
     test_names();
 
     printf("\n============================================================\n");

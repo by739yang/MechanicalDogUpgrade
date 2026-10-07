@@ -89,6 +89,7 @@ typedef struct {
 typedef struct {
     proto_cmd_t cmd;          /**< 最近一条被接受的命令 */
     uint32_t    seq;          /**< 它的 `seq` */
+    bool        seq_valid;    /**< `seq` 是否有效（收到过带序号的帧）*/
     uint32_t    rx_ms;        /**< 它被接受的本机时刻 */
     bool        valid;        /**< 有没有收到过命令 */
     bool        estop;        /**< 急停闩锁：只能由 `cmd_queue_clear_estop()` 清 */
@@ -111,14 +112,25 @@ bool cmd_queue_set_timeouts(cmd_queue_t *q, uint32_t hb_ms, uint32_t long_ms);
  *
  * @param q        邮箱
  * @param cmd      命令（按值拷贝）
+ * @param has_seq  **这一帧里到底有没有序号**。严格格式有（`seq` 是必填键），
+ *                 老页面格式**没有** ⇒ 传 false。
  * @param now_ms   本机时刻
  * @return true    收下了
  * @return false   丢弃（`seq` 不严格更新）—— 已计入 `dropped_seq`
  *
+ * ⚠️ **`has_seq` 这个参数是必须的，不是多余的。** 老页面格式里根本没有 `seq`
+ *    （`proto.c` 的字段表把它标成 `PROTO_REQ_STRICT`），解出来 `seq` 恒为 0；
+ *    如果这里无条件按"seq 必须严格更新"判，**第二帧起会全部被丢弃**，
+ *    而 `dropped_seq` 会飞快地涨。这个 bug 在真机上被抓到过：
+ *    `accepted=1 rejected=4 dropped_seq=629` —— 页面发了 630 帧只活了 1 帧。
+ *
+ * @note `has_seq == false` 时**永远接受**（老路径没有重放保护，这是已知残余缺口，
+ *       见迁移表 §0.5(10)），并且**不去动** `seq`/`seq_valid`，
+ *       免得一帧老格式把严格格式的序号基准搞乱。
  * @note 即使 `cmd->estop` 为真，本函数**也**会更新"最后收到时刻"：
  *       急停也是客户端活着的证据。
  */
-bool cmd_queue_post(cmd_queue_t *q, const proto_cmd_t *cmd, uint32_t now_ms);
+bool cmd_queue_post(cmd_queue_t *q, const proto_cmd_t *cmd, bool has_seq, uint32_t now_ms);
 
 /** 协议层拒了一帧 —— 只计数，不动邮箱（邮箱里那条仍然有效）。 */
 void cmd_queue_count_reject(cmd_queue_t *q);

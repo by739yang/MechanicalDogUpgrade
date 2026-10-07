@@ -48,23 +48,33 @@ bool cmd_queue_set_timeouts(cmd_queue_t *q, uint32_t hb_ms, uint32_t long_ms)
  * 写入
  * ======================================================================== */
 
-bool cmd_queue_post(cmd_queue_t *q, const proto_cmd_t *cmd, uint32_t now_ms)
+bool cmd_queue_post(cmd_queue_t *q, const proto_cmd_t *cmd, bool has_seq, uint32_t now_ms)
 {
     if (q == NULL || cmd == NULL) {
         return false;
     }
 
     /*
-     * 顺序由**协议层那唯一的** `proto_seq_newer()` 判定（回绕安全），
-     * 本模块不自己写 `a > b` —— 那种比较在 49.7 天回绕时会判错。
+     * 序号只在**这一帧真的带序号**时才判（回绕安全，用协议层那唯一的
+     * `proto_seq_newer()`）。本模块不自己写 `a > b` —— 那种比较在 49.7 天回绕时会判错。
+     *
+     * ⚠️ 老页面格式没有 `seq`（字段表里标的是 `PROTO_REQ_STRICT`），解出来恒为 0。
+     *    这里若无条件判"必须严格更新"，**第二帧起全部会被丢弃** ——
+     *    真机上就是这么暴露的：`accepted=1 rejected=4 dropped_seq=629`，
+     *    页面发了 630 帧，只有第 1 帧活下来。
      */
-    if (q->valid && !proto_seq_newer(cmd->seq, q->seq)) {
-        q->cnt.dropped_seq++;
-        return false;
+    if (has_seq) {
+        if (q->seq_valid && !proto_seq_newer(cmd->seq, q->seq)) {
+            q->cnt.dropped_seq++;
+            return false;
+        }
+        q->seq = cmd->seq;
+        q->seq_valid = true;
     }
+    /* has_seq == false：永远接受，且**不动** seq/seq_valid
+       （别让一帧老格式把严格格式的序号基准搞乱）*/
 
     q->cmd    = *cmd;
-    q->seq    = cmd->seq;
     q->rx_ms  = now_ms;
     q->valid  = true;
     q->cnt.accepted++;
